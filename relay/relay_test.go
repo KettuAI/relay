@@ -57,7 +57,12 @@ func newHarness(t *testing.T, opts Options) *harness {
 	}
 	opts.Origin = func(r *http.Request) string { return "http://" + r.Host }
 	if opts.Address == nil {
-		opts.Address = func(*http.Request) string { return "test" }
+		opts.Address = func(r *http.Request) string {
+			if a := r.Header.Get("X-Test-Address"); a != "" {
+				return a
+			}
+			return "test"
+		}
 	}
 	opts.Features = func() []string { return []string{FeatureAccessKey, FeatureDrain} }
 	opts.Version = "test"
@@ -69,22 +74,37 @@ func newHarness(t *testing.T, opts Options) *harness {
 	h.server = httptest.NewServer(r)
 	t.Cleanup(h.server.Close)
 	h.origin = h.server.URL
-	h.key = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
+	_, h.key, _ = ed25519.GenerateKey(nil)
 	h.id = HostID(h.key.Public().(ed25519.PublicKey))
 	return h
 }
 
 func (h *harness) dial(path string) *websocket.Conn {
 	h.t.Helper()
+	c, status, err := h.dialFrom("test", path)
+	if err != nil {
+		h.t.Fatalf("dial %s: %d %v", path, status, err)
+	}
+	return c
+}
+
+// dialFrom opens a socket as if from address, returning the HTTP status of a refused upgrade.
+func (h *harness) dialFrom(address, path string) (*websocket.Conn, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, _, err := websocket.Dial(ctx, strings.Replace(h.origin, "http", "ws", 1)+path, nil)
+	c, resp, err := websocket.Dial(ctx, strings.Replace(h.origin, "http", "ws", 1)+path, &websocket.DialOptions{
+		HTTPHeader: http.Header{"X-Test-Address": {address}},
+	})
 	if err != nil {
-		h.t.Fatal(err)
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		return nil, status, err
 	}
 	c.SetReadLimit(1 << 20)
 	h.t.Cleanup(func() { c.CloseNow() })
-	return c
+	return c, 0, nil
 }
 
 func read(t *testing.T, c *websocket.Conn) (websocket.MessageType, []byte, error) {
@@ -287,7 +307,8 @@ func TestRefusals(t *testing.T) {
 	expectClose(t, c, CloseMalformed)
 
 	// A signature for another id's key.
-	other := h.dial("/v1/hosts/" + HostID(bytes.Repeat([]byte{1}, 32)))
+	otherKey, _, _ := ed25519.GenerateKey(nil)
+	other := h.dial("/v1/hosts/" + HostID(otherKey))
 	challenge := readText(t, other)
 	sendJSON(t, other, map[string]string{
 		"type":      "sign-in",
@@ -346,7 +367,9 @@ func TestLimits(t *testing.T) {
 	for range MaxDevices {
 		h.join(host, map[string]any{"type": "connect"})
 	}
+	// Joined devices fill the host's slots; one more is refused once it asks.
 	extra := h.dial("/v1/hosts/" + h.id + "/connect")
+	sendJSON(t, extra, map[string]any{"type": "connect"})
 	expectClose(t, extra, CloseTooMany)
 
 	h2 := newHarness(t, Options{ConnectionsPerMinute: 2, DevicesPerMinute: 1000})
@@ -424,6 +447,151 @@ func TestShutdown(t *testing.T) {
 	}
 	expectClose(t, host, CloseGoingAway)
 	<-done
-	late := h.dial("/v1/hosts/" + h.id)
-	expectClose(t, late, CloseGoingAway)
+	if _, status, err := h.dialFrom("test", "/v1/hosts/"+h.id); err == nil || status != http.StatusServiceUnavailable {
+		t.Fatalf("a socket after shutdown: %d %v", status, err)
+	}
+}
+
+// live has the host's side of a pair answer, as a host that took the device does.
+func live(t *testing.T, accept *websocket.Conn) {
+	t.Helper()
+	send(t, accept, websocket.MessageBinary, []byte{0})
+}
+
+func TestFloodOfOneHostLeavesRoomForARealDevice(t *testing.T) {
+	h := newHarness(t, Options{ConnectionsPerMinute: 10000, DevicesPerMinute: 10000, JoinTimeout: 300 * time.Millisecond})
+	host := h.ready()
+
+	// Idle sockets from many addresses that never send their connect.
+	for i := range 3 * DefaultMaxPendingDevices {
+		h.dialFrom("idle-"+string(rune('a'+i%26))+string(rune('a'+i/26)), "/v1/hosts/"+h.id+"/connect")
+	}
+	// Devices that join but that the host never takes, which cannot speak the channel.
+	var silent []*websocket.Conn
+	for range MaxDevices {
+		device, _ := h.join(host, map[string]any{"type": "connect"})
+		silent = append(silent, device)
+	}
+	for _, device := range silent {
+		expectClose(t, device, CloseTimeout)
+	}
+
+	device, accept := h.join(host, map[string]any{"type": "connect", "features": []string{"drain"}})
+	live(t, accept)
+	time.Sleep(500 * time.Millisecond)
+	send(t, device, websocket.MessageBinary, []byte("hello"))
+	if _, got, err := read(t, accept); err != nil || string(got) != "hello" {
+		t.Fatalf("the real device did not get through: %v", err)
+	}
+}
+
+func TestFloodOfTheRelayLeavesRoomForARealDevice(t *testing.T) {
+	h := newHarness(t, Options{ConnectionsPerMinute: 10000, DevicesPerMinute: 10000, MaxConnections: 24, MaxConnectionsPerAddress: 8})
+	host := h.ready()
+
+	// One address holds no more than its share, refused before any upgrade.
+	for range 8 {
+		if _, _, err := h.dialFrom("attacker", "/v1/hosts/"+h.id+"/connect"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, status, err := h.dialFrom("attacker", "/v1/hosts/"+h.id+"/connect"); err == nil || status != http.StatusTooManyRequests {
+		t.Fatalf("past the address's share: %d %v", status, err)
+	}
+	device, accept := h.join(host, map[string]any{"type": "connect"})
+	live(t, accept)
+
+	// Many addresses fill the relay; past its cap requests are refused before the upgrade.
+	var held []*websocket.Conn
+	for i := 0; ; i++ {
+		c, status, err := h.dialFrom("many-"+string(rune('a'+i)), "/v1/hosts/"+h.id+"/connect")
+		if err != nil {
+			if status != http.StatusServiceUnavailable {
+				t.Fatalf("past the relay's cap: %d %v", status, err)
+			}
+			break
+		}
+		held = append(held, c)
+	}
+	// The pair joined before keeps working.
+	send(t, device, websocket.MessageBinary, []byte{1})
+	if _, got, err := read(t, accept); err != nil || !bytes.Equal(got, []byte{1}) {
+		t.Fatal("a joined pair broke under the flood")
+	}
+	// Once some go, a real device gets in.
+	for _, c := range held[:4] {
+		c.CloseNow()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for h.relay.Connections() > 24-4 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	next, nextAccept := h.join(host, map[string]any{"type": "connect"})
+	live(t, nextAccept)
+	send(t, next, websocket.MessageBinary, []byte{2})
+	if _, got, err := read(t, nextAccept); err != nil || !bytes.Equal(got, []byte{2}) {
+		t.Fatal("a real device did not get in after the flood eased")
+	}
+}
+
+func TestJoinTimeoutSparesALivePair(t *testing.T) {
+	h := newHarness(t, Options{JoinTimeout: 200 * time.Millisecond})
+	host := h.ready()
+	silent, silentAccept := h.join(host, map[string]any{"type": "connect"})
+	device, accept := h.join(host, map[string]any{"type": "connect"})
+	live(t, accept)
+	if _, got, err := read(t, device); err != nil || !bytes.Equal(got, []byte{0}) {
+		t.Fatal("the host's answer did not pass")
+	}
+	expectClose(t, silent, CloseTimeout)
+	expectClose(t, silentAccept, CloseTimeout)
+	time.Sleep(300 * time.Millisecond)
+	send(t, device, websocket.MessageBinary, []byte{5})
+	if _, got, err := read(t, accept); err != nil || !bytes.Equal(got, []byte{5}) {
+		t.Fatal("a live pair was closed")
+	}
+}
+
+// gatedAdmission holds each host check until it is let through, to order it against a rotation.
+type gatedAdmission struct {
+	keyAdmission
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (a *gatedAdmission) Host(ctx context.Context, id, credential string) (Grant, error) {
+	grant, err := a.keyAdmission.Host(ctx, id, credential)
+	a.entered <- struct{}{}
+	<-a.release
+	return grant, err
+}
+
+func TestRotationDuringASignIn(t *testing.T) {
+	admission := &gatedAdmission{keyAdmission: keyAdmission{key: "old"}, entered: make(chan struct{}), release: make(chan struct{})}
+	h := newHarness(t, Options{Admission: admission})
+	stale := func(g Grant) bool { return g == keyGrant("old") }
+
+	// The key changes after the check took the old key and before its grant is installed.
+	c := h.signIn("old")
+	<-admission.entered
+	admission.mu.Lock()
+	admission.key = "new"
+	admission.mu.Unlock()
+	h.relay.Revoke(stale)
+	admission.release <- struct{}{}
+	expectClose(t, c, CloseUnauthorized)
+
+	// The key changes before the check starts: the old key is refused by the check itself.
+	c = h.signIn("old")
+	<-admission.entered
+	admission.release <- struct{}{}
+	expectClose(t, c, CloseUnauthorized)
+
+	// A sign-in with the new key is not held to the earlier rotation.
+	c = h.signIn("new")
+	<-admission.entered
+	admission.release <- struct{}{}
+	if m := readText(t, c); m["type"] != "ready" {
+		t.Fatalf("the new key: %v", m)
+	}
 }
