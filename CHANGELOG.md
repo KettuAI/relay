@@ -2,7 +2,7 @@
 
 All notable changes to kettu-relay. Versions follow [semantic versioning](https://semver.org).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-24
 
 The first version.
 
@@ -22,5 +22,5 @@ The first version.
   trusted proxies. Refuses to start with a key file or private key others can read.
 - Serves the Kettu web client from the latest Kettu release, checked against its SHA-256, with the
   `web` feature.
-- Archives for Linux, macOS and Windows with the license and third-party notices, and the image
-  `ghcr.io/kettuai/relay`.
+- Archives for Linux, macOS and Windows, each on amd64 and arm64, with the license and
+  third-party notices, and the image `ghcr.io/kettuai/relay` for Linux on amd64 and arm64.
