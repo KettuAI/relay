@@ -1,7 +1,6 @@
 package accesskey
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -55,6 +54,14 @@ func TestLoadMakesAPrivateFileOnce(t *testing.T) {
 	}
 	if _, err := fromEnv.Reset(); !errors.Is(err, ErrFromEnv) {
 		t.Fatalf("reset of the environment's key: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(filepath.Join(dir, FileName), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Load(dir, ""); err == nil {
+			t.Fatal("a key file others can read is taken")
+		}
 	}
 	if _, _, err := Load(t.TempDir(), "not-a-key"); err == nil || strings.Contains(err.Error(), "not-a-key") {
 		t.Fatalf("a bad key in the environment: %v", err)
@@ -143,7 +150,10 @@ func TestRelayWithAccessKey(t *testing.T) {
 		t.Cleanup(func() { c.CloseNow() })
 		return c
 	}
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{3}, 32))
+	_, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	id := relay.HostID(key.Public().(ed25519.PublicKey))
 	signIn := func(credential string) *websocket.Conn {
 		host := dial("/v1/hosts/" + id)

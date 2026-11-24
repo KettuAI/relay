@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/KettuAI/relay/internal/private"
 )
 
 const (
@@ -36,11 +38,14 @@ func Pin(cert *x509.Certificate) string {
 // SelfSigned loads the certificate for ip kept in dir, or makes and keeps a new one, so the pin
 // stays the same across restarts.
 func SelfSigned(dir string, ip net.IP) (tls.Certificate, string, error) {
+	if _, err := private.Dir(dir); err != nil {
+		return tls.Certificate{}, "", err
+	}
+	if err := private.File(filepath.Join(dir, keyFile)); err != nil {
+		return tls.Certificate{}, "", err
+	}
 	if cert, pin, err := load(dir, ip); err == nil {
 		return cert, pin, nil
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return tls.Certificate{}, "", err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
