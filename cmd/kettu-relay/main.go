@@ -24,6 +24,7 @@ import (
 	"github.com/KettuAI/relay/internal/accesskey"
 	"github.com/KettuAI/relay/internal/certs"
 	"github.com/KettuAI/relay/internal/config"
+	"github.com/KettuAI/relay/internal/private"
 	"github.com/KettuAI/relay/internal/web"
 	"github.com/KettuAI/relay/link"
 	"github.com/KettuAI/relay/relay"
@@ -69,10 +70,11 @@ func main() {
 
 // setup is what every command reads: the settings, the key and, at an IP address, the pin.
 type setup struct {
-	cfg   config.Config
-	store *accesskey.Store
-	pin   string
-	cert  *tls.Certificate
+	cfg     config.Config
+	store   *accesskey.Store
+	created bool
+	pin     string
+	cert    *tls.Certificate
 }
 
 func load(logf func(string, ...any)) (setup, error) {
@@ -80,8 +82,12 @@ func load(logf func(string, ...any)) (setup, error) {
 	if err != nil {
 		return setup{}, err
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+	tightened, err := private.Dir(cfg.DataDir)
+	if err != nil {
 		return setup{}, err
+	}
+	if tightened && logf != nil {
+		logf("narrowed %s to mode 0700, readable by the relay's user alone", cfg.DataDir)
 	}
 	store, created, err := accesskey.Load(cfg.DataDir, cfg.AccessKey)
 	if err != nil {
@@ -90,7 +96,10 @@ func load(logf func(string, ...any)) (setup, error) {
 	if created && logf != nil {
 		logf("made a new access key in %s", filepath.Join(cfg.DataDir, accesskey.FileName))
 	}
-	s := setup{cfg: cfg, store: store}
+	if err := private.Tree(filepath.Join(cfg.DataDir, "acme")); err != nil {
+		return setup{}, err
+	}
+	s := setup{cfg: cfg, store: store, created: created}
 	if cfg.Mode == config.IP {
 		cert, pin, err := certs.SelfSigned(filepath.Join(cfg.DataDir, "tls"), cfg.IP)
 		if err != nil {
@@ -109,6 +118,12 @@ func printLink() error {
 	s, err := load(nil)
 	if err != nil {
 		return err
+	}
+	if s.cfg.AccessKey != "" {
+		// A key from the environment is the operator's to keep; it is never printed whole.
+		fmt.Println(s.link().Masked())
+		fmt.Println("The key is the one in KETTU_RELAY_ACCESS_KEY; put it after key= in place of the shortened one.")
+		return nil
 	}
 	fmt.Println(s.link())
 	return nil
@@ -157,15 +172,23 @@ func run() error {
 			}
 			return features
 		},
-		Version:              version,
-		ConnectionsPerMinute: cfg.ConnectionsPerMinute,
-		DevicesPerMinute:     cfg.DevicesPerMinute,
+		Version:                  version,
+		ConnectionsPerMinute:     cfg.ConnectionsPerMinute,
+		DevicesPerMinute:         cfg.DevicesPerMinute,
+		MaxConnections:           cfg.MaxConnections,
+		MaxConnectionsPerAddress: cfg.MaxConnectionsPerAddress,
+		MaxPendingDevices:        cfg.MaxPendingDevices,
+		JoinTimeout:              cfg.JoinTimeout,
 	})
 	if err != nil {
 		return err
 	}
 	pages := web.Handler(updater, cfg.HasDomain())
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !cfg.Admitted(req) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		if r.Handles(req.URL.Path) {
 			r.ServeHTTP(w, req)
 			return
@@ -243,6 +266,9 @@ func run() error {
 	}
 
 	logf("kettu-relay %s serving %s mode on %s", version, cfg.Mode, cfg.Listen)
+	for _, warning := range cfg.Warnings {
+		logf("warning: %s", warning)
+	}
 	switch cfg.Mode {
 	case config.Domain:
 		logf("certificate for %s comes from Let's Encrypt on the first https request", cfg.Domain)
@@ -267,7 +293,16 @@ func run() error {
 		r.Revoke(admission.Stale)
 	})
 
-	fmt.Printf("\nPaste this link into Kettu, in Settings > Remote access > Your own relay:\n\n  %s\n\n", s.link())
+	switch {
+	case s.created:
+		// Shown once, when the key is new; later starts keep it out of the logs.
+		fmt.Printf("\nPaste this link into Kettu, in Settings > Remote access > Your own relay:\n\n  %s\n\n"+
+			"It holds the relay's access key and is shown only now. Run `kettu-relay link` to print it again.\n\n", s.link())
+	case cfg.AccessKey != "":
+		logf("relay at %s, with the access key from KETTU_RELAY_ACCESS_KEY", s.link().Masked())
+	default:
+		logf("relay at %s; run `kettu-relay link` to print the full link with its access key", s.link().Masked())
+	}
 
 	select {
 	case err := <-serveErr:
