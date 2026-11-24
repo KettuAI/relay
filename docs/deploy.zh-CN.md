@@ -85,7 +85,15 @@ docker run -d --name kettu-relay --restart unless-stopped \
 
 ### 用 systemd
 
-从 [releases](https://github.com/KettuAI/relay/releases) 下载对应系统的压缩包，用 `SHA256SUMS` 校验后解压，再用 [`deploy/kettu-relay.service`](../deploy/kettu-relay.service) 里的 unit，文件开头写了步骤。每个压缩包里都有程序、它的许可证和 `THIRD_PARTY_NOTICES.txt`。
+在 Linux 上，安装脚本会一次做完：下载最新版本、用 `SHA256SUMS` 校验、创建 `kettu-relay` 用户、安装程序和 [`deploy/kettu-relay.service`](../deploy/kettu-relay.service) 里的 unit、把设置写进 `/etc/kettu-relay.env`、启动服务并打印链接。`--domain`、`--ip` 和 `--url` 给一个：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+```
+
+再运行一次就是更新程序，设置和访问密钥都保留。`--version X.Y.Z` 安装指定版本；加 `--no-service`（或在 macOS 上运行）只安装程序。
+
+想手动装，就从 [releases](https://github.com/KettuAI/relay/releases) 下载对应系统的压缩包，用 `SHA256SUMS` 校验后解压，按 unit 文件开头写的步骤做。每个压缩包里都有程序、它的许可证和 `THIRD_PARTY_NOTICES.txt`。
 
 以中继的用户身份运行它的命令，这样读到的是同一份文件：
 

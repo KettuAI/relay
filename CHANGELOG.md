@@ -2,6 +2,11 @@
 
 All notable changes to kettu-relay. Versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+- `install.sh` installs the latest release on Linux and macOS after checking it against
+  `SHA256SUMS`, and on Linux with systemd sets up the `kettu-relay` service and prints the link.
+
 ## [0.1.0] - 2026-11-24
 
 The first version.
