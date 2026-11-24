@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -37,6 +38,14 @@ type Admission interface {
 	Renew(ctx context.Context, id string, current Grant, credential string) (Grant, error)
 	// Device checks a device's connect against the grant of the host it asks for.
 	Device(ctx context.Context, id string, connect DeviceMessage, host Grant) error
+}
+
+// DeviceGrants is an Admission that gives each device a grant of its own, such as one for the
+// credential in its connect. When the Admission is one, the relay calls DeviceGrant in place of
+// Device, and Revoke matches a device by its own grant as well as by its host's. A device grant's
+// Deadline is not used.
+type DeviceGrants interface {
+	DeviceGrant(ctx context.Context, id string, connect DeviceMessage, host Grant) (Grant, error)
 }
 
 // Options configure a Relay. Zero numbers take the defaults below.
@@ -124,6 +133,7 @@ type socket struct {
 	written chan struct{}
 	once    sync.Once
 	code    int
+	bytes   *atomic.Uint64
 
 	// Guarded by Relay.mu.
 	state    state
@@ -134,6 +144,8 @@ type socket struct {
 	nonce    string
 	origin   string
 	grant    Grant
+	own      Grant
+	profile  *Profile
 	since    uint64
 	features []string
 	token    string
@@ -171,6 +183,7 @@ type Relay struct {
 	revoked     uint64
 	revocations []revocation
 	active      sync.WaitGroup
+	bytes       atomic.Uint64
 }
 
 // New makes a relay from its options; Admission, Origin and Address are required.
@@ -328,7 +341,7 @@ func (r *Relay) serveInfo(w http.ResponseWriter, req *http.Request) {
 
 func (r *Relay) serveSocket(conn *websocket.Conn, path SocketPath, origin string) {
 	conn.SetReadLimit(MaxMessage)
-	s := &socket{conn: conn, out: make(chan frame, queueLength), dead: make(chan struct{}), written: make(chan struct{})}
+	s := &socket{conn: conn, out: make(chan frame, queueLength), dead: make(chan struct{}), written: make(chan struct{}), bytes: &r.bytes}
 
 	r.mu.Lock()
 	r.active.Add(1)
@@ -432,6 +445,7 @@ func (r *Relay) read(s *socket) {
 			r.mu.Unlock()
 			return
 		}
+		r.bytes.Add(uint64(len(data)))
 		if typ == websocket.MessageText && string(data) == Ping {
 			s.trySend(websocket.MessageText, []byte(Pong))
 			continue
@@ -539,7 +553,8 @@ func (r *Relay) hostMessage(s *socket, typ websocket.MessageType, data []byte) {
 		s.grant = grant
 		r.grantDeadline(s)
 	case ok && s.state == ready && message.Type == "profile":
-		// This relay lists no hosts; the profile is dropped.
+		// Kept for Hosts; a null profile clears it.
+		s.profile = message.Profile
 	default:
 		r.end(s, CloseMalformed, CloseMalformed)
 	}
@@ -567,16 +582,25 @@ func (r *Relay) deviceMessage(s *socket, typ websocket.MessageType, data []byte)
 		r.end(s, CloseTooMany, CloseTooMany)
 		return
 	}
-	s.state = verifying
+	s.state, s.since = verifying, r.revoked
 	r.stopTimer(s)
 	grant := host.grant
 	r.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), admissionTimeout)
-	err := r.opts.Admission.Device(ctx, rm.id, connect, grant)
+	var own Grant
+	var err error
+	if granter, ok := r.opts.Admission.(DeviceGrants); ok {
+		own, err = granter.DeviceGrant(ctx, rm.id, connect, grant)
+	} else {
+		err = r.opts.Admission.Device(ctx, rm.id, connect, grant)
+	}
 	cancel()
 	r.mu.Lock()
 	if s.ended || s.state != verifying {
 		return
+	}
+	if err == nil && own != nil && r.revokedSince(s.since, own) {
+		err = ErrForbidden
 	}
 	if err != nil {
 		r.end(s, admissionClose(err), CloseNormal)
@@ -588,7 +612,7 @@ func (r *Relay) deviceMessage(s *socket, typ websocket.MessageType, data []byte)
 		return
 	}
 	token := NewToken()
-	s.state, s.token, s.grant, s.via, s.features = waiting, token, grant, host, connect.Features
+	s.state, s.token, s.grant, s.own, s.via, s.features = waiting, token, grant, own, host, connect.Features
 	rm.waiting[token] = s
 	r.deadline(s, AcceptTimeout, CloseOffline)
 	host.trySend(websocket.MessageText, incomingMessage(token))
@@ -707,9 +731,10 @@ func (r *Relay) stopTimer(s *socket) {
 	}
 }
 
-// Revoke closes the signed-in hosts whose grant matches with 4401, and the devices that reached
-// a host through such a grant with 4403. A sign-in or renewal whose check is still running when
-// Revoke is called is held to it too, once its grant comes back.
+// Revoke closes the signed-in hosts whose grant matches with 4401, and with 4403 the devices that
+// reached a host through such a grant or whose own grant (see DeviceGrants) matches. A sign-in,
+// renewal or device check still running when Revoke is called is held to it too, once its grant
+// comes back.
 func (r *Relay) Revoke(match func(Grant) bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -720,7 +745,7 @@ func (r *Relay) Revoke(match func(Grant) bool) {
 	}
 	for _, rm := range r.rooms {
 		for s := range rm.devices {
-			if (s.state == waiting || s.state == joined) && s.grant != nil && match(s.grant) {
+			if (s.state == waiting || s.state == joined) && ((s.grant != nil && match(s.grant)) || (s.own != nil && match(s.own))) {
 				r.end(s, CloseForbidden, CloseNormal)
 			}
 		}
@@ -748,6 +773,22 @@ func (r *Relay) Drain() {
 	}
 }
 
+// Undrain ends Drain: hosts that sign in and devices that join from now on are not told to move.
+// Those already told are not told otherwise.
+func (r *Relay) Undrain() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.draining = false
+}
+
+// CloseAll closes every socket with 1001, as Shutdown does at its end, but goes on taking new
+// ones.
+func (r *Relay) CloseAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.endAll()
+}
+
 // Shutdown drains the relay, waits for its sockets to close until ctx is done, then closes the
 // rest with 1001 and takes no more.
 func (r *Relay) Shutdown(ctx context.Context) {
@@ -768,6 +809,18 @@ func (r *Relay) Shutdown(ctx context.Context) {
 func (r *Relay) closeAll() {
 	r.mu.Lock()
 	r.stopped = true
+	r.endAll()
+	r.mu.Unlock()
+	done := make(chan struct{})
+	go func() { r.active.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
+// endAll closes every socket with 1001. Runs with r.mu held.
+func (r *Relay) endAll() {
 	for _, rm := range r.rooms {
 		for s := range rm.hosts {
 			r.end(s, CloseGoingAway, CloseGoingAway)
@@ -776,13 +829,61 @@ func (r *Relay) closeAll() {
 			r.end(s, CloseGoingAway, CloseGoingAway)
 		}
 	}
-	r.mu.Unlock()
-	done := make(chan struct{})
-	go func() { r.active.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+}
+
+// Host is a signed-in host, as Hosts lists it.
+type Host struct {
+	ID    string
+	Grant Grant
+	// Profile is the last one the host sent, nil when it sent none or a null one.
+	Profile *Profile
+}
+
+// Hosts lists the signed-in hosts whose grant matches, in no order.
+func (r *Relay) Hosts(match func(Grant) bool) []Host {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var hosts []Host
+	for id, rm := range r.rooms {
+		if s := rm.host; s != nil && !s.ended && s.grant != nil && match(s.grant) {
+			hosts = append(hosts, Host{ID: id, Grant: s.grant, Profile: s.profile})
+		}
 	}
+	return hosts
+}
+
+// Stats are counts of what a relay holds and has passed.
+type Stats struct {
+	// Hosts are the signed-in hosts.
+	Hosts int
+	// Devices are the device sockets let through to a host, waiting for it or joined.
+	Devices int
+	// Pairs are the joined devices.
+	Pairs int
+	// Bytes are those of every message read and written since the relay was made.
+	Bytes uint64
+}
+
+// Stats counts what the relay holds now.
+func (r *Relay) Stats() Stats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := Stats{Bytes: r.bytes.Load()}
+	for _, rm := range r.rooms {
+		if rm.host != nil {
+			st.Hosts++
+		}
+		for d := range rm.devices {
+			switch d.state {
+			case waiting:
+				st.Devices++
+			case joined:
+				st.Devices++
+				st.Pairs++
+			}
+		}
+	}
+	return st
 }
 
 // Sockets is how many sockets the relay holds now in its rooms.
@@ -862,6 +963,7 @@ func (s *socket) write() {
 func (s *socket) writeFrame(f frame) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
+	s.bytes.Add(uint64(len(f.data)))
 	if s.conn.Write(ctx, f.typ, f.data) != nil {
 		s.close(CloseGoingAway)
 		s.conn.CloseNow()

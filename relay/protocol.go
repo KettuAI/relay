@@ -153,8 +153,8 @@ func VerifySignIn(publicKey, signature []byte, origin, id, nonce string) bool {
 	return ed25519.Verify(publicKey, SignInText(origin, id, nonce), signature)
 }
 
-// Profile is how a relay with the hosts feature lists a host. This relay has no such feature
-// and drops profiles, but reads them so a host that sends one is not cut off.
+// Profile is how a relay with the hosts feature lists a host. The relay keeps a host's last
+// one for Relay.Hosts and lists none itself.
 type Profile struct {
 	Key      string `json:"key"`
 	Name     string `json:"name"`
