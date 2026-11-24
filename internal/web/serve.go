@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 // pageCSP lets the page reach nothing but its own origin, where the relay is.
@@ -15,6 +16,8 @@ const pageCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe
 	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 const immutable = "public, max-age=31536000, immutable"
+
+const writeDeadline = time.Minute
 
 var types = map[string]string{
 	".html":        "text/html; charset=utf-8",
@@ -38,6 +41,8 @@ var types = map[string]string{
 // With hsts it tells browsers to come back over https alone.
 func Handler(u *Updater, hsts bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A reader that stalls is cut off rather than holding the connection.
+		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeDeadline))
 		h := w.Header()
 		if hsts {
 			h.Set("Strict-Transport-Security", "max-age=31536000")

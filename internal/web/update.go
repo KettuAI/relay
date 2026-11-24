@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,13 +37,21 @@ const (
 	// downloadPrefix is where the release's assets must be.
 	downloadPrefix = "https://github.com/KettuAI/Kettu/releases/download/"
 
-	maxArchive   = 256 << 20
-	maxUnpacked  = 512 << 20
-	maxFiles     = 10000
+	maxArchive   = 64 << 20
+	maxFiles     = 5000
 	maxChecksums = 1 << 20
 	maxRelease   = 4 << 20
+	maxRedirects = 5
 
 	currentFile = "current"
+)
+
+// Variables so tests can make them small.
+var (
+	maxUnpacked int64 = 256 << 20
+	// maxStream bounds everything gzip gives, tar headers and skipped bytes included.
+	maxStream     int64 = maxUnpacked + 16<<20
+	unpackTimeout       = 2 * time.Minute
 )
 
 // ErrNoClient means the latest release has no web client for relays.
@@ -56,7 +65,10 @@ type Updater struct {
 	Release string
 	// AllowedPrefix is where asset downloads may point; the Kettu releases when "".
 	AllowedPrefix string
-	Client        *http.Client
+	// Hosts are the https hosts a request or its redirects may reach; GitHub's release hosts
+	// when nil.
+	Hosts  []string
+	Client *http.Client
 
 	mu      sync.Mutex
 	current string
@@ -69,8 +81,13 @@ func (u *Updater) Load() {
 	if err != nil {
 		return
 	}
-	dir := filepath.Join(u.Dir, filepath.Base(strings.TrimSpace(string(name))))
-	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
+	// The copy may sit one folder down, where its archive wrapped it.
+	rel := filepath.FromSlash(strings.TrimSpace(string(name)))
+	if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "client-") || strings.Count(filepath.ToSlash(rel), "/") > 1 {
+		return
+	}
+	dir := filepath.Join(u.Dir, rel)
+	if info, err := os.Lstat(filepath.Join(dir, "index.html")); err != nil || !info.Mode().IsRegular() {
 		return
 	}
 	tag, _ := os.ReadFile(filepath.Join(dir, ".release"))
@@ -159,8 +176,8 @@ func (u *Updater) Update(ctx context.Context) (bool, error) {
 		os.RemoveAll(dir)
 		return false, err
 	}
-	rel1, _ := filepath.Rel(u.Dir, root)
-	if err := writeAtomic(filepath.Join(u.Dir, currentFile), []byte(rel1+"\n")); err != nil {
+	stored, _ := filepath.Rel(u.Dir, root)
+	if err := writeAtomic(filepath.Join(u.Dir, currentFile), []byte(filepath.ToSlash(stored)+"\n")); err != nil {
 		os.RemoveAll(dir)
 		return false, err
 	}
@@ -179,7 +196,13 @@ func (u *Updater) prune(keep, before string) {
 	}
 	for _, e := range entries {
 		p := filepath.Join(u.Dir, e.Name())
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "client-") || p == keep || (before != "" && strings.HasPrefix(before, p)) {
+		if strings.HasPrefix(e.Name(), ".download-") {
+			// A download a stopped run left behind.
+			os.Remove(p)
+			continue
+		}
+		within := func(dir string) bool { return dir == p || strings.HasPrefix(dir, p+string(filepath.Separator)) }
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "client-") || within(keep) || (before != "" && within(before)) {
 			continue
 		}
 		os.RemoveAll(p)
@@ -221,17 +244,50 @@ func checksum(sums []byte, name string) ([]byte, error) {
 	return nil, fmt.Errorf("%s does not list %s", Checksums, name)
 }
 
-func (u *Updater) client() *http.Client {
-	if u.Client != nil {
-		return u.Client
+// githubHosts are where the release API and its downloads answer, redirects included.
+var githubHosts = []string{"api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+
+func (u *Updater) allowed(target *url.URL) bool {
+	hosts := u.Hosts
+	if hosts == nil {
+		if target.Scheme != "https" {
+			return false
+		}
+		hosts = githubHosts
 	}
-	return &http.Client{Timeout: 5 * time.Minute}
+	for _, h := range hosts {
+		if strings.EqualFold(target.Host, h) {
+			return true
+		}
+	}
+	return false
 }
 
-func (u *Updater) request(ctx context.Context, url string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (u *Updater) client() *http.Client {
+	base := u.Client
+	if base == nil {
+		base = &http.Client{Timeout: 5 * time.Minute}
+	}
+	c := *base
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return errors.New("too many redirects")
+		}
+		if !u.allowed(req.URL) {
+			return fmt.Errorf("a redirect to %s, which is not where Kettu releases are", req.URL.Host)
+		}
+		return nil
+	}
+	return &c
+}
+
+func (u *Updater) request(ctx context.Context, target string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
+	}
+	if !u.allowed(req.URL) {
+		return nil, fmt.Errorf("%s is not where Kettu releases are", req.URL.Host)
 	}
 	req.Header.Set("User-Agent", "kettu-relay")
 	resp, err := u.client().Do(req)
@@ -245,8 +301,8 @@ func (u *Updater) request(ctx context.Context, url string) (*http.Response, erro
 	return resp, nil
 }
 
-func (u *Updater) get(ctx context.Context, url string, limit int64) ([]byte, error) {
-	resp, err := u.request(ctx, url)
+func (u *Updater) get(ctx context.Context, target string, limit int64) ([]byte, error) {
+	resp, err := u.request(ctx, target)
 	if err != nil {
 		return nil, err
 	}
@@ -261,8 +317,8 @@ func (u *Updater) get(ctx context.Context, url string, limit int64) ([]byte, err
 	return b, nil
 }
 
-func (u *Updater) getJSON(ctx context.Context, url string, v any) error {
-	b, err := u.get(ctx, url, maxRelease)
+func (u *Updater) getJSON(ctx context.Context, target string, v any) error {
+	b, err := u.get(ctx, target, maxRelease)
 	if err != nil {
 		return err
 	}
@@ -270,8 +326,8 @@ func (u *Updater) getJSON(ctx context.Context, url string, v any) error {
 }
 
 // download writes the archive to a temporary file and keeps it only when its SHA-256 is want.
-func (u *Updater) download(ctx context.Context, url string, want []byte) (string, error) {
-	resp, err := u.request(ctx, url)
+func (u *Updater) download(ctx context.Context, target string, want []byte) (string, error) {
+	resp, err := u.request(ctx, target)
 	if err != nil {
 		return "", err
 	}
@@ -314,13 +370,14 @@ func Unpack(archive, dir string) error {
 		return err
 	}
 	defer gz.Close()
+	stream := &bounded{r: gz, left: maxStream, until: time.Now().Add(unpackTimeout)}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
 
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(stream)
 	var total int64
 	for files := 0; ; files++ {
 		h, err := tr.Next()
@@ -370,6 +427,28 @@ func Unpack(archive, dir string) error {
 			return fmt.Errorf("the web client archive has %q, which is not a plain file or folder", h.Name)
 		}
 	}
+}
+
+// bounded stops a reader past a byte count or a time, whatever the tar reader asks it for.
+type bounded struct {
+	r     io.Reader
+	left  int64
+	until time.Time
+}
+
+func (b *bounded) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, errors.New("the web client archive is too large unpacked")
+	}
+	if time.Now().After(b.until) {
+		return 0, errors.New("the web client archive takes too long to unpack")
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.r.Read(p)
+	b.left -= int64(n)
+	return n, err
 }
 
 // entryName is an archive entry's path inside the folder, "" for the folder itself.
