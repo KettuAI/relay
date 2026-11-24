@@ -3,6 +3,7 @@ package config
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 func parse(env map[string]string) (Config, error) {
@@ -50,6 +51,9 @@ func TestRefused(t *testing.T) {
 		{"KETTU_RELAY_TRUSTED_PROXIES": "nonsense"},
 		{"KETTU_RELAY_WEB": "maybe"},
 		{"KETTU_RELAY_DEVICES_PER_MINUTE": "-1"},
+		{"KETTU_RELAY_URL": "http://localhost:8080", "KETTU_RELAY_LISTEN": "0.0.0.0:8798"},
+		{"KETTU_RELAY_MAX_CONNECTIONS": "lots"},
+		{"KETTU_RELAY_JOIN_TIMEOUT": "-5"},
 	} {
 		if _, err := parse(env); err == nil {
 			t.Errorf("%v is taken", env)
@@ -102,6 +106,47 @@ func TestForwardedAddresses(t *testing.T) {
 		}
 		if got := c.cfg.Address(req); got != c.want {
 			t.Errorf("%s %v: %s, want %s", c.remote, c.xff, got, c.want)
+		}
+	}
+}
+
+func TestLimitsAndWarnings(t *testing.T) {
+	c, err := parse(map[string]string{
+		"KETTU_RELAY_MAX_CONNECTIONS":             "100",
+		"KETTU_RELAY_MAX_CONNECTIONS_PER_ADDRESS": "7",
+		"KETTU_RELAY_MAX_PENDING_DEVICES":         "3",
+		"KETTU_RELAY_JOIN_TIMEOUT":                "4",
+	})
+	if err != nil || c.MaxConnections != 100 || c.MaxConnectionsPerAddress != 7 || c.MaxPendingDevices != 3 || c.JoinTimeout != 4*time.Second {
+		t.Fatalf("%+v %v", c, err)
+	}
+	quiet, _ := parse(map[string]string{"KETTU_RELAY_URL": "https://relay.example.com"})
+	open, _ := parse(map[string]string{"KETTU_RELAY_URL": "https://relay.example.com", "KETTU_RELAY_LISTEN": "0.0.0.0:8798"})
+	if len(quiet.Warnings) != 0 || len(open.Warnings) != 1 {
+		t.Fatalf("warnings %v %v", quiet.Warnings, open.Warnings)
+	}
+	if _, err := parse(map[string]string{"KETTU_RELAY_URL": "http://localhost:8080"}); err != nil {
+		t.Fatalf("an http URL on loopback: %v", err)
+	}
+}
+
+func TestAdmittedOnlyFromTrustedProxies(t *testing.T) {
+	proxy, _ := parse(map[string]string{"KETTU_RELAY_URL": "https://relay.example.com", "KETTU_RELAY_LISTEN": "0.0.0.0:8798", "KETTU_RELAY_TRUSTED_PROXIES": "10.0.0.0/8"})
+	domain, _ := parse(map[string]string{"KETTU_RELAY_DOMAIN": "relay.example.com"})
+	for _, c := range []struct {
+		cfg    Config
+		remote string
+		want   bool
+	}{
+		{proxy, "10.2.3.4:5000", true},
+		{proxy, "192.0.2.5:5000", false},
+		{proxy, "127.0.0.1:5000", false},
+		{domain, "192.0.2.5:5000", true},
+	} {
+		req, _ := http.NewRequest("GET", "https://relay.example.com/v1", nil)
+		req.RemoteAddr = c.remote
+		if got := c.cfg.Admitted(req); got != c.want {
+			t.Errorf("%s: admitted %v", c.remote, got)
 		}
 	}
 }

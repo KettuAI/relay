@@ -25,7 +25,7 @@ phone never means changing the key.
 
 ## Quick start
 
-Each start prints a link with the relay's address and access key:
+The first start makes the relay's access key and prints a link with the relay's address and key:
 
 ```
 Paste this link into Kettu, in Settings > Remote access > Your own relay:
@@ -34,7 +34,11 @@ Paste this link into Kettu, in Settings > Remote access > Your own relay:
 ```
 
 Paste it into Kettu on each computer, under **Settings › Remote access › Your own relay**, and
-choose **Use this relay**. Print the link again any time with `kettu-relay link`.
+choose **Use this relay**. The full link is printed only that once; later starts log the address
+with the key masked (`krk_…3hT9`). Print the full link any time with `kettu-relay link`, which also
+makes the key when there is none yet, so running it before the first start keeps the key out of
+the logs altogether. Anyone who has the link can sign computers in to your relay: if it ever ended
+up in a log or a chat you do not control, run `kettu-relay key reset`.
 
 Pick one of the ways below to give the relay a certificate.
 
@@ -48,7 +52,7 @@ docker run -d --name kettu-relay --restart unless-stopped \
   -e KETTU_RELAY_DOMAIN=relay.example.com \
   -v kettu-relay:/data \
   ghcr.io/kettuai/relay:latest
-docker logs kettu-relay
+docker exec kettu-relay kettu-relay link
 ```
 
 The relay gets and renews its certificate from Let's Encrypt by itself. The image runs as an
@@ -88,8 +92,11 @@ location / {
 
 The relay takes the client's address from `X-Forwarded-For` only when the request comes from a
 trusted proxy: by default loopback addresses, or the addresses and CIDR ranges in
-`KETTU_RELAY_TRUSTED_PROXIES`. In Docker, set it to your proxy's network and
-`KETTU_RELAY_LISTEN=:8798`.
+`KETTU_RELAY_TRUSTED_PROXIES`. Behind a proxy the relay also takes connections only from those
+addresses and refuses the rest, since its own port serves plain http. In Docker, set
+`KETTU_RELAY_TRUSTED_PROXIES` to your proxy's network and `KETTU_RELAY_LISTEN=:8798`, and keep that
+port unpublished, reachable only by the proxy; the relay notes this in its log whenever it listens
+on an address other than loopback.
 
 ### On an IP address alone
 
@@ -111,10 +118,11 @@ serves no web client on an IP address.
 
 ### systemd
 
-Download the binary for your system from the
-[releases](https://github.com/KettuAI/relay/releases), check it against `SHA256SUMS`, and use the
-unit in [`deploy/kettu-relay.service`](deploy/kettu-relay.service), whose header lists the steps.
-Run the commands below as the relay's user so they read the same files:
+Download the archive for your system from the
+[releases](https://github.com/KettuAI/relay/releases), check it against `SHA256SUMS`, unpack it, and
+use the unit in [`deploy/kettu-relay.service`](deploy/kettu-relay.service), whose header lists the
+steps. Each archive holds the program, its license and `THIRD_PARTY_NOTICES.txt`. Run the commands
+below as the relay's user so they read the same files:
 
 ```sh
 sudo -u kettu-relay sh -c 'set -a; . /etc/kettu-relay.env; kettu-relay link'
@@ -135,8 +143,8 @@ Plain http is never served on any other address, since the access key crosses th
 
 | Command | What it does |
 | --- | --- |
-| `kettu-relay` | Runs the relay and prints its link. |
-| `kettu-relay link` | Prints the link again. |
+| `kettu-relay` | Runs the relay. The first start prints its link; later ones log it with the key masked. |
+| `kettu-relay link` | Prints the full link, making the access key if there is none yet. |
 | `kettu-relay key reset` | Makes a new access key. A running relay cuts off the computers signed in with the old key within a few seconds; paste the new link into each. |
 | `kettu-relay version` | Prints the version. |
 
@@ -159,10 +167,20 @@ All settings are environment variables.
 | `KETTU_RELAY_TRUSTED_PROXIES` | loopback behind a proxy, else none | Addresses and CIDR ranges whose `X-Forwarded-For` is believed. |
 | `KETTU_RELAY_WEB` | `on` | `off` stops serving the web client. |
 | `KETTU_RELAY_CONNECTIONS_PER_MINUTE` | `120` | New connections a minute from one address. |
-| `KETTU_RELAY_DEVICES_PER_MINUTE` | `60` | New device connections a minute to one computer. |
+| `KETTU_RELAY_DEVICES_PER_MINUTE` | `60` | New device connections a minute to one computer from one address. |
+| `KETTU_RELAY_MAX_CONNECTIONS` | `4096` | Connections the relay holds at once; past it new ones are refused with 503. |
+| `KETTU_RELAY_MAX_CONNECTIONS_PER_ADDRESS` | `64` | Connections one address holds at once; past it new ones are refused with 429. |
+| `KETTU_RELAY_MAX_PENDING_DEVICES` | `16` | Devices waiting to connect to one computer; past it the one that waited longest is let go. |
+| `KETTU_RELAY_JOIN_TIMEOUT` | `10` | Seconds a connected device has before the computer answers it, else both sides are closed. |
 
 Each computer may have 16 devices connected at once, a message may be up to 64 KiB, and a computer
-or device has 10 seconds to sign in or connect, as the protocol sets.
+or device has 10 seconds to sign in or connect, as the protocol sets. Devices bring no key, so these
+limits are what keep strangers who know a computer's id from filling its slots or the relay: the
+slots of a computer's real devices are not taken by connections that never pair.
+
+The key file, the certificates and the web client live in the data directory, which the relay keeps
+at mode 0700. It refuses to start when the key file or a private key can be read by other users,
+or when the data directory belongs to another user.
 
 ## The web client
 
@@ -193,7 +211,8 @@ go test -race ./...
 ```
 
 The relay uses Go's standard library, `golang.org/x/crypto` for Let's Encrypt and
-`github.com/coder/websocket`. The package `github.com/KettuAI/relay/relay` is the relay itself,
+`github.com/coder/websocket`; their licenses are in
+[`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt), made by `scripts/notices.sh`. The package `github.com/KettuAI/relay/relay` is the relay itself,
 with who may sign in left to an `Admission`, so other programs can build on it.
 
 ## License

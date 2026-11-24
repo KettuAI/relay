@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/KettuAI/relay/link"
 )
@@ -59,9 +60,16 @@ type Config struct {
 	ACMEEmail      string
 	TrustedProxies []netip.Prefix
 	// Web serves the web client, where the mode allows it.
-	Web                  bool
-	ConnectionsPerMinute int
-	DevicesPerMinute     int
+	Web bool
+	// Warnings are settings that work but deserve the operator's attention, for the log.
+	Warnings []string
+
+	ConnectionsPerMinute     int
+	DevicesPerMinute         int
+	MaxConnections           int
+	MaxConnectionsPerAddress int
+	MaxPendingDevices        int
+	JoinTimeout              time.Duration
 }
 
 // FromEnv reads the settings from the environment.
@@ -123,6 +131,14 @@ func Parse(getenv func(string) string) (Config, error) {
 		}
 		c.Origin = origin
 		c.Listen = or(c.Listen, DefaultLocalListen)
+		host, _, err := net.SplitHostPort(c.Listen)
+		switch {
+		case err != nil:
+		case strings.HasPrefix(origin, "http://") && !link.Loopback(host):
+			return Config{}, errors.New("with an http KETTU_RELAY_URL the relay listens on a loopback address only")
+		case !link.Loopback(host):
+			c.Warnings = append(c.Warnings, "KETTU_RELAY_LISTEN is not a loopback address: keep its port unreachable from anything but your proxy, since the relay serves plain http there and takes connections only from KETTU_RELAY_TRUSTED_PROXIES")
+		}
 	default:
 		c.Mode = Loopback
 		c.Listen = or(c.Listen, DefaultLocalListen)
@@ -170,6 +186,20 @@ func Parse(getenv func(string) string) (Config, error) {
 	if c.DevicesPerMinute, err = number(get, "KETTU_RELAY_DEVICES_PER_MINUTE"); err != nil {
 		return Config{}, err
 	}
+	if c.MaxConnections, err = number(get, "KETTU_RELAY_MAX_CONNECTIONS"); err != nil {
+		return Config{}, err
+	}
+	if c.MaxConnectionsPerAddress, err = number(get, "KETTU_RELAY_MAX_CONNECTIONS_PER_ADDRESS"); err != nil {
+		return Config{}, err
+	}
+	if c.MaxPendingDevices, err = number(get, "KETTU_RELAY_MAX_PENDING_DEVICES"); err != nil {
+		return Config{}, err
+	}
+	seconds, err := number(get, "KETTU_RELAY_JOIN_TIMEOUT")
+	if err != nil {
+		return Config{}, err
+	}
+	c.JoinTimeout = time.Duration(seconds) * time.Second
 	return c, nil
 }
 
@@ -287,6 +317,16 @@ func (c Config) Address(r *http.Request) string {
 		}
 	}
 	return remote.String()
+}
+
+// Admitted reports whether a request may reach the relay: behind a proxy, only connections from
+// a trusted proxy are taken, so the plain http port is no way around it.
+func (c Config) Admitted(r *http.Request) bool {
+	if c.Mode != Proxy {
+		return true
+	}
+	remote := remoteAddr(r.RemoteAddr)
+	return remote.IsValid() && c.trusted(remote)
 }
 
 func (c Config) trusted(addr netip.Addr) bool {

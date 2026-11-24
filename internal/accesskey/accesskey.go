@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KettuAI/relay/internal/private"
 	"github.com/KettuAI/relay/relay"
 )
 
@@ -84,6 +85,12 @@ func Load(dataDir, env string) (store *Store, created bool, err error) {
 }
 
 func readKey(path string) (string, error) {
+	if _, err := os.Lstat(path); err != nil {
+		return "", err
+	}
+	if err := private.File(path); err != nil {
+		return "", err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

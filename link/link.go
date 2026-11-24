@@ -30,6 +30,19 @@ func (l Link) String() string {
 	return s
 }
 
+// Masked is the link with all but the key's last four characters left out, for logs.
+func (l Link) Masked() string {
+	key := l.Key
+	if len(key) > 8 {
+		key = "krk_…" + key[len(key)-4:]
+	}
+	s := l.Origin + "#key=" + key
+	if l.Pin != "" {
+		s += "&pin=" + l.Pin
+	}
+	return s
+}
+
 // Parse reads a link. It takes nothing but an origin before `#`, takes key and pin after it and
 // ignores other fields, and asks for a pin exactly when an https relay is at an IP address.
 func Parse(s string) (Link, error) {

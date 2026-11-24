@@ -1,14 +1,20 @@
 package link
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
 
-const (
-	key = "krk_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
-	pin = "A1l5acSz3nk-OfVkdXoabfGkc-1e1RuvNnxBpGujxxw"
-)
+// The key is made per run so no access key is ever written into the repository.
+var key = func() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return "krk_" + base64.RawURLEncoding.EncodeToString(b)
+}()
+
+const pin = "A1l5acSz3nk-OfVkdXoabfGkc-1e1RuvNnxBpGujxxw"
 
 func TestFormat(t *testing.T) {
 	for l, want := range map[Link]string{
@@ -74,4 +80,12 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("origin %q", l.Origin)
 		}
 	})
+}
+
+func TestMasked(t *testing.T) {
+	l := Link{Origin: "https://203.0.113.7", Key: key, Pin: pin}
+	got := l.Masked()
+	if strings.Contains(got, key[4:len(key)-4]) || !strings.HasSuffix(got, "…"+key[len(key)-4:]+"&pin="+pin) {
+		t.Fatalf("masked link %q", got)
+	}
 }

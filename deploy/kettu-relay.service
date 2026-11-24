@@ -3,8 +3,10 @@
 #   sudo install -m 0755 kettu-relay /usr/local/bin/kettu-relay
 #   printf 'KETTU_RELAY_DOMAIN=relay.example.com\nKETTU_RELAY_DATA=/var/lib/kettu-relay\n' | sudo tee /etc/kettu-relay.env
 #   sudo install -m 0644 kettu-relay.service /etc/systemd/system/
+#   sudo install -d -m 0700 -o kettu-relay -g kettu-relay /var/lib/kettu-relay
+#   sudo -u kettu-relay sh -c 'set -a; . /etc/kettu-relay.env; kettu-relay link'   # the link for Kettu
 #   sudo systemctl daemon-reload && sudo systemctl enable --now kettu-relay
-#   journalctl -u kettu-relay   # shows the link to paste into Kettu
+# The journal shows the relay's address with its access key masked.
 [Unit]
 Description=Kettu relay
 After=network-online.target

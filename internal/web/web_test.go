@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,7 +108,8 @@ func (g *github) publish(tag string, archive []byte) {
 }
 
 func (g *github) updater(t *testing.T) *Updater {
-	return &Updater{Dir: filepath.Join(t.TempDir(), "web"), Release: g.server.URL + "/release", AllowedPrefix: g.server.URL + "/download/"}
+	host := strings.TrimPrefix(g.server.URL, "http://")
+	return &Updater{Dir: filepath.Join(t.TempDir(), "web"), Release: g.server.URL + "/release", AllowedPrefix: g.server.URL + "/download/", Hosts: []string{host}}
 }
 
 func TestUpdateAndServe(t *testing.T) {
@@ -270,6 +272,75 @@ func TestWrappedArchive(t *testing.T) {
 	dir, _ := u.Current()
 	if b, err := os.ReadFile(filepath.Join(dir, "index.html")); err != nil || string(b) != "page" {
 		t.Fatal("the wrapped folder is not served")
+	}
+	// A restart while GitHub cannot be reached still serves the wrapped copy.
+	g.server.Close()
+	later := &Updater{Dir: u.Dir, Release: u.Release, AllowedPrefix: u.AllowedPrefix, Hosts: u.Hosts}
+	later.Load()
+	if got, tag := later.Current(); got != dir || tag != "v0.2.0" {
+		t.Fatalf("after a restart: %q %q, want %q", got, tag, dir)
+	}
+	if _, err := later.Update(context.Background()); err == nil {
+		t.Fatal("an update with GitHub down succeeds")
+	}
+	if got, _ := later.Current(); got != dir {
+		t.Fatal("a failed update after a restart dropped the copy")
+	}
+}
+
+func TestLoadRefusesAStoredPathOutside(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("x"), 0o600)
+	web := filepath.Join(dir, "web")
+	os.MkdirAll(web, 0o700)
+	for _, stored := range []string{"../", "/etc", "client-x/../..", "other"} {
+		os.WriteFile(filepath.Join(web, currentFile), []byte(stored+"\n"), 0o600)
+		u := &Updater{Dir: web}
+		u.Load()
+		if got, _ := u.Current(); got != "" {
+			t.Errorf("%q loads %q", stored, got)
+		}
+	}
+}
+
+func TestRedirectsStayOnTheReleaseHosts(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "{}")
+	}))
+	defer elsewhere.Close()
+	g := newGitHub(t)
+	redirect := httptest.NewServer(http.RedirectHandler(elsewhere.URL+"/release", http.StatusFound))
+	defer redirect.Close()
+	u := g.updater(t)
+	u.Release = redirect.URL + "/release"
+	u.Hosts = append(u.Hosts, strings.TrimPrefix(redirect.URL, "http://"))
+	if _, err := u.Update(context.Background()); err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("a redirect off the release hosts: %v", err)
+	}
+	if (&Updater{}).allowed(mustURL(t, "http://github.com/x")) {
+		t.Fatal("plain http to GitHub is allowed")
+	}
+	if !(&Updater{}).allowed(mustURL(t, "https://objects.githubusercontent.com/x")) {
+		t.Fatal("GitHub's asset host is refused")
+	}
+}
+
+func mustURL(t *testing.T, s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestUnpackBoundsTheWholeStream(t *testing.T) {
+	before := maxStream
+	maxStream = 4096
+	defer func() { maxStream = before }()
+	archive := filepath.Join(t.TempDir(), "a.tar.gz")
+	os.WriteFile(archive, tarball(t, []entry{{name: "big", body: strings.Repeat("x", 64<<10)}}), 0o600)
+	if err := Unpack(archive, filepath.Join(t.TempDir(), "out")); err == nil {
+		t.Fatal("an archive past the stream bound is unpacked")
 	}
 }
 
