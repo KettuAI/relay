@@ -4,6 +4,10 @@ All notable changes to kettu-relay. Versions follow [semantic versioning](https:
 
 ## [Unreleased]
 
+- The `relay` package gives programs built on it more to work with: `Hosts` lists the signed-in
+  hosts with their last profile, `Stats` counts hosts, devices, pairs and bytes, `Undrain` ends a
+  drain, `CloseAll` closes every socket without stopping, and an Admission that implements
+  `DeviceGrants` gives each device a grant of its own, which `Revoke` matches.
 - `install.sh` installs the latest release on Linux and macOS after checking it against
   `SHA256SUMS`, and on Linux with systemd sets up the `kettu-relay` service and prints the link.
 
