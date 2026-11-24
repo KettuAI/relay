@@ -23,11 +23,13 @@ The facts a client of a self-hosted relay relies on:
 - **Devices.** A device sends `{"type":"connect","features":["drain"]}` with **no `token` field**.
   The relay also takes an empty or any other token and ignores it. A device must never send a Kettu
   account token to a relay it does not trust for one.
-- **The link.** `kettu-relay` prints `<origin>#key=<access key>`, plus `&pin=<pin>` for a relay at
+- **The link.** `kettu-relay link` prints `<origin>#key=<access key>`, plus `&pin=<pin>` for a relay at
   an IP address: `https://relay.example.com#key=krk_...` or
   `https://203.0.113.7#key=krk_...&pin=...`. The origin is `https://host[:port]` with no path; it
   is `http://` only on a loopback address. The key is `krk_` followed by 43 characters of base64url
-  (32 bytes). Unknown fields after `#` are ignored.
+  (32 bytes). Unknown fields after `#` are ignored. The relay prints the full link on its first
+  start and on `kettu-relay link` only; its log shows the key masked as `krk_…` and its last four
+  characters, which is not a link a client takes.
 - **The pin.** A relay at an IP address has a self-signed certificate. Its pin is the SHA-256 of the
   certificate's SubjectPublicKeyInfo in DER, in base64url without padding (43 characters), the same
   pin clients already use for relays reached by IP. A client checks the pin alone, not the
@@ -90,8 +92,12 @@ else, or anything before sign-in, closes the socket with 4400.
    The token is what the relay's admission asks for; a self-hosted relay asks for none. The only
    device feature is `drain`.
 2. When the host is signed in, the relay tells it `incoming`; once the host opened the accept
-   socket, the device gets `{"type":"joined"}`.
-3. From then on binary messages pass both ways. A text message other than `ping` closes both
+   socket, the device gets `{"type":"joined"}`. A host has 16 device slots, taken at `connect`: past
+   them the device is closed with 4429. At most 16 more devices may wait before their `connect`;
+   when another arrives, the one that waited longest is closed with 4429.
+3. From then on binary messages pass both ways. Until the first binary message from the host's
+   side, the pair is held for 10 seconds (a relay setting), then both sockets are closed with 4408,
+   so a device the host never answers does not keep a slot. A text message other than `ping` closes both
    sockets with 4400. Either side closing closes the other with 1000, or with the relay's code
    when the relay closed it.
 
@@ -112,12 +118,15 @@ messages. A token that is not one waiting closes it with 4404.
 | 4401 | `unauthorized` | A key that is not the id's, a bad signature, or a credential not taken, such as a wrong or reset access key. |
 | 4403 | `forbidden` | A device the relay's admission refuses, or one joined through a host whose credential was revoked. |
 | 4404 | `offline` | The host is not signed in, did not accept in time, or the accept token is not one. |
-| 4408 | `timeout` | No sign-in or connect within 10 seconds. |
+| 4408 | `timeout` | No sign-in or connect within 10 seconds, or a joined pair the host's side did not answer in time. |
 | 4409 | `replaced` | Another sign-in for the same id took this one's place. |
-| 4429 | `too_many` | Too many connections from an address or to a host in a minute, or more than 16 devices at once. |
+| 4429 | `too_many` | Too many connections from an address or to a host in a minute, more than 16 devices at once, or a waiting device let go for a newer one. |
 
 A refused upgrade is accepted and closed with its code, since a browser cannot read an HTTP status
-on a failed WebSocket. A request on a socket path that is not an upgrade gets 426; an unknown path
+on a failed WebSocket. Only when the relay is under load does it refuse before the upgrade, with an
+HTTP status and `Retry-After`: 503 when it holds as many connections as it takes, or is stopping,
+and 429 when one address holds as many as it may, or, while the relay is busy, past the per-minute
+limits. A client should try again later, as after 4429. A request on a socket path that is not an upgrade gets 426; an unknown path
 gets 404.
 
 ## Features
