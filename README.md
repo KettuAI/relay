@@ -25,6 +25,14 @@ It only passes Kettu's end-to-end encrypted channel along, so it never sees your
 
 ## Quick start
 
+Point a domain at your server, open ports 80 and 443, and install it as a service (Linux with systemd):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+```
+
+Or run it in Docker:
+
 ```sh
 docker run -d --name kettu-relay --restart unless-stopped \
   -p 80:80 -p 443:443 \
@@ -34,7 +42,7 @@ docker run -d --name kettu-relay --restart unless-stopped \
 docker exec kettu-relay kettu-relay link
 ```
 
-Paste the printed link into Kettu under **Settings › Remote access › Relay › Your own relay**. Running it behind your own proxy, on an IP address alone or with systemd, and every setting, are in the [deployment guide](./docs/deploy.md).
+Paste the printed link into Kettu under **Settings › Remote access › Relay › Your own relay**. Running it behind your own proxy or on an IP address alone, and every setting, are in the [deployment guide](./docs/deploy.md).
 
 ## License
 

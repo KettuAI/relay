@@ -25,6 +25,14 @@ kettu-relay 是 [Kettu](https://github.com/KettuAI/Kettu) 的中继，运行在�
 
 ## 快速开始
 
+把域名解析到你的服务器，放开 80 和 443 端口，然后装成系统服务（Linux，systemd）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+```
+
+或者用 Docker 运行：
+
 ```sh
 docker run -d --name kettu-relay --restart unless-stopped \
   -p 80:80 -p 443:443 \
@@ -34,7 +42,7 @@ docker run -d --name kettu-relay --restart unless-stopped \
 docker exec kettu-relay kettu-relay link
 ```
 
-把打印出的链接粘贴到 Kettu 的 **设置 › 远程访问 › 中继 › 自己的中继** 里。放在自己的反向代理后面、只有 IP 地址、用 systemd 运行，以及全部设置，见[部署指南](./docs/deploy.zh-CN.md)。
+把打印出的链接粘贴到 Kettu 的 **设置 › 远程访问 › 中继 › 自己的中继** 里。放在自己的反向代理后面、只有 IP 地址，以及全部设置，见[部署指南](./docs/deploy.zh-CN.md)。
 
 ## 许可证
 

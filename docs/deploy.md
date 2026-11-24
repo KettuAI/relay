@@ -85,7 +85,15 @@ The link then reads `https://203.0.113.7#key=krk_...&pin=...`, and Kettu trusts 
 
 ### With systemd
 
-Download the archive for your system from the [releases](https://github.com/KettuAI/relay/releases), check it against `SHA256SUMS`, unpack it, and use the unit in [`deploy/kettu-relay.service`](../deploy/kettu-relay.service), whose header lists the steps. Each archive holds the program, its license and `THIRD_PARTY_NOTICES.txt`.
+The install script does it all on Linux: it downloads the latest release, checks it against `SHA256SUMS`, creates the `kettu-relay` user, installs the program and the unit in [`deploy/kettu-relay.service`](../deploy/kettu-relay.service), writes the settings to `/etc/kettu-relay.env`, starts the service and prints the link. Give one of `--domain`, `--ip` and `--url`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+```
+
+Run it again to update the program; the settings and the access key stay. `--version X.Y.Z` installs a given version, and `--no-service` (or running it on macOS) installs the program only.
+
+To do it by hand, download the archive for your system from the [releases](https://github.com/KettuAI/relay/releases), check it against `SHA256SUMS`, unpack it, and follow the steps in the unit's header. Each archive holds the program, its license and `THIRD_PARTY_NOTICES.txt`.
 
 Run the relay's commands as its user, so they read the same files:
 
