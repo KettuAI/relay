@@ -1,0 +1,6 @@
+/kettu-relay
+/kettu-relay.exe
+/dist/
+/data/
+*.test
+*.out
