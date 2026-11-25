@@ -4,6 +4,12 @@ All notable changes to kettu-relay. Versions follow [semantic versioning](https:
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-25
+
+- Serves the web client's artifact frames, `/_kettu/frame`, `/_kettu/frame-strict` and
+  `/_kettu/frame-viewer`, with an isolated sandbox CSP and Permissions-Policy, and its viewer files
+  under `/_kettu/viewer/` with read-only CORS headers, so artifacts open live in the web client
+  the relay serves (Kettu 0.1.21 or later).
 - The `relay` package gives programs built on it more to work with: `Hosts` lists the signed-in
   hosts with their last profile, `Stats` counts hosts, devices, pairs and bytes, `Undrain` ends a
   drain, `CloseAll` closes every socket without stopping, and an Admission that implements
