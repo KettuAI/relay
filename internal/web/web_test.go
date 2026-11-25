@@ -171,6 +171,96 @@ func TestUpdateAndServe(t *testing.T) {
 	}
 }
 
+func TestServesSandboxFramesAndViewersWithIsolatedHeaders(t *testing.T) {
+	files := append([]entry{}, client...)
+	files = append(files,
+		entry{name: "_kettu/frame.html", body: "<!doctype html><script>1</script>"},
+		entry{name: "_kettu/frame-strict.html", body: "<!doctype html><script>2</script>"},
+		entry{name: "_kettu/frame-viewer.html", body: "<!doctype html><script>3</script>"},
+		entry{name: "_kettu/viewer/document.js", body: "export const doc = 1"},
+		entry{name: "_kettu/viewer/chunks/chunk-abc.js", body: "export const c = 2"},
+	)
+	g := newGitHub(t)
+	g.publish("v0.2.0", tarball(t, files))
+	u := g.updater(t)
+	if ok, err := u.Update(context.Background()); err != nil || !ok {
+		t.Fatalf("update: %v %v", ok, err)
+	}
+	server := httptest.NewServer(Handler(u, true))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		path     string
+		wantCDN  bool
+		wantSelf bool
+		wantBody string
+	}{
+		{"/_kettu/frame", true, false, "<!doctype html><script>1</script>"},
+		{"/_kettu/frame-strict", false, false, "<!doctype html><script>2</script>"},
+		{"/_kettu/frame-viewer", false, true, "<!doctype html><script>3</script>"},
+	} {
+		resp, err := http.Get(server.URL + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || string(body) != tc.wantBody {
+			t.Fatalf("%s: %d %q", tc.path, resp.StatusCode, body)
+		}
+		csp := resp.Header.Get("Content-Security-Policy")
+		if !strings.Contains(csp, "sandbox allow-scripts") || strings.Contains(csp, "allow-same-origin") {
+			t.Errorf("%s: bad sandbox CSP %q", tc.path, csp)
+		}
+		if !strings.Contains(csp, "frame-ancestors 'self'") {
+			t.Errorf("%s: missing frame-ancestors %q", tc.path, csp)
+		}
+		if hasCDN := strings.Contains(csp, "cdn.jsdelivr.net"); hasCDN != tc.wantCDN {
+			t.Errorf("%s: CDN=%v want %v in %q", tc.path, hasCDN, tc.wantCDN, csp)
+		}
+		if hasSelf := strings.Contains(csp, "script-src 'self'"); hasSelf != tc.wantSelf {
+			t.Errorf("%s: script-src self=%v want %v in %q", tc.path, hasSelf, tc.wantSelf, csp)
+		}
+		if got := resp.Header.Get("X-Frame-Options"); got != "" {
+			t.Errorf("%s: unexpected X-Frame-Options %q", tc.path, got)
+		}
+		if got := resp.Header.Get("Permissions-Policy"); !strings.Contains(got, "camera=()") {
+			t.Errorf("%s: missing Permissions-Policy %q", tc.path, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		path   string
+		status int
+		cache  string
+	}{
+		{"/_kettu/viewer/document.js", 200, "no-cache"},
+		{"/_kettu/viewer/chunks/chunk-abc.js", 200, immutable},
+		{"/_kettu/viewer/missing.js", 404, ""},
+	} {
+		resp, err := http.Get(server.URL + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.status {
+			t.Fatalf("%s: status %d want %d", tc.path, resp.StatusCode, tc.status)
+		}
+		if tc.status != 200 {
+			continue
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "null" {
+			t.Errorf("%s: ACAO %q", tc.path, got)
+		}
+		if got := resp.Header.Get("Cross-Origin-Resource-Policy"); got != "cross-origin" {
+			t.Errorf("%s: CORP %q", tc.path, got)
+		}
+		if got := resp.Header.Get("Cache-Control"); got != tc.cache {
+			t.Errorf("%s: Cache-Control %q want %q", tc.path, got, tc.cache)
+		}
+	}
+}
+
 func TestFailedUpdatesKeepTheLastGoodCopy(t *testing.T) {
 	g := newGitHub(t)
 	g.publish("v0.2.0", tarball(t, client))
