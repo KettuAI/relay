@@ -1,13 +1,16 @@
 #!/bin/sh
-# Installs kettu-relay from its GitHub releases. On Linux with systemd it also sets up the
-# kettu-relay service (run it as root); elsewhere, or with --no-service, it installs the program.
+# Installs kettu-relay from Kettu's download service, or from its GitHub releases when that fails.
+# On Linux with systemd it also sets up the kettu-relay service (run it as root); elsewhere, or
+# with --no-service, it installs the program.
 #
-#   curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+#   curl -fsSL https://kettu.sh/relay/install | sudo sh -s -- --domain relay.example.com
 #
 # Running it again updates the program and keeps the settings and the access key.
 set -eu
 
 repo=KettuAI/relay
+# Laid out alike, so a file is at the same path below each; tried in this order.
+sources="https://download.kettu.sh/relay https://github.com/$repo/releases"
 version=
 setting=
 service=yes
@@ -104,29 +107,60 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-if [ -z "$version" ]; then
-	fetch "https://api.github.com/repos/$repo/releases/latest" "$tmp/latest.json" ||
-		die "could not read the latest release"
-	version=$(sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' "$tmp/latest.json" | head -n 1)
-fi
-case $version in
-'' | *[!0-9A-Za-z.-]*) die "not a version: '$version'" ;;
-esac
-
-name="kettu-relay-$version-$os-$arch"
-say "Downloading kettu-relay $version for $os/$arch"
-fetch "https://github.com/$repo/releases/download/v$version/$name.tar.gz" "$tmp/$name.tar.gz" ||
-	die "could not download $name.tar.gz"
-fetch "https://github.com/$repo/releases/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS" ||
-	die "could not download SHA256SUMS"
-
-want=$(awk -v f="$name.tar.gz" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
 if command -v sha256sum >/dev/null 2>&1; then
-	got=$(sha256sum "$tmp/$name.tar.gz" | awk '{ print $1 }')
+	sha256() { sha256sum "$1" | awk '{ print $1 }'; }
 else
-	got=$(shasum -a 256 "$tmp/$name.tar.gz" | awk '{ print $1 }')
+	sha256() { shasum -a 256 "$1" | awk '{ print $1 }'; }
 fi
-[ -n "$want" ] && [ "$got" = "$want" ] || die "$name.tar.gz does not match SHA256SUMS"
+
+case $version in
+*[!0-9A-Za-z.-]*) die "not a version: '$version'" ;;
+esac
+wanted=$version
+
+# Downloads the release from one source into $tmp; the latest one's version is read from its
+# SHA256SUMS, which names every archive, and the archive is then taken by that version.
+from() {
+	if [ -n "$wanted" ]; then
+		sums_url="$1/download/v$wanted/SHA256SUMS"
+	else
+		sums_url="$1/latest/download/SHA256SUMS"
+	fi
+	fetch "$sums_url" "$tmp/SHA256SUMS" || {
+		say "Could not download SHA256SUMS from $1"
+		return 1
+	}
+	version=$wanted
+	if [ -z "$version" ]; then
+		version=$(sed -n "s/^[0-9a-fA-F]\{64\}  *\*\{0,1\}kettu-relay-\(.*\)-$os-$arch\.tar\.gz\$/\1/p" "$tmp/SHA256SUMS" | head -n 1)
+	fi
+	case $version in
+	'' | *[!0-9A-Za-z.-]*)
+		say "$1 lists no build for $os/$arch"
+		return 1
+		;;
+	esac
+	name="kettu-relay-$version-$os-$arch"
+	say "Downloading kettu-relay $version for $os/$arch from $1"
+	fetch "$1/download/v$version/$name.tar.gz" "$tmp/$name.tar.gz" || {
+		say "Could not download $name.tar.gz from $1"
+		return 1
+	}
+	want=$(awk -v f="$name.tar.gz" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
+	[ -n "$want" ] && [ "$(sha256 "$tmp/$name.tar.gz")" = "$want" ] || {
+		say "$name.tar.gz from $1 does not match SHA256SUMS"
+		return 1
+	}
+}
+
+got=no
+for source in $sources; do
+	if from "$source"; then
+		got=yes
+		break
+	fi
+done
+[ "$got" = yes ] || die "could not download kettu-relay from any source"
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 program="$tmp/$name/kettu-relay"
 
@@ -152,9 +186,14 @@ fi
 id kettu-relay >/dev/null 2>&1 ||
 	useradd --system --no-create-home --shell "$(command -v nologin || echo /usr/sbin/nologin)" kettu-relay
 install -m 0755 "$program" /usr/local/bin/kettu-relay
-fetch "https://raw.githubusercontent.com/$repo/v$version/deploy/kettu-relay.service" "$tmp/kettu-relay.service" ||
-	die "could not download the service unit"
-install -m 0644 "$tmp/kettu-relay.service" /etc/systemd/system/kettu-relay.service
+unit="$tmp/$name/deploy/kettu-relay.service"
+if [ ! -f "$unit" ]; then
+	# Archives before 0.1.2 carry no service unit.
+	unit="$tmp/kettu-relay.service"
+	fetch "https://raw.githubusercontent.com/$repo/v$version/deploy/kettu-relay.service" "$unit" ||
+		die "could not download the service unit"
+fi
+install -m 0644 "$unit" /etc/systemd/system/kettu-relay.service
 install -d -m 0700 -o kettu-relay -g kettu-relay "$data_dir"
 
 if [ ! -f "$env_file" ]; then

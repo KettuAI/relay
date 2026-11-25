@@ -443,3 +443,104 @@ func TestAssetsOnlyFromTheRelease(t *testing.T) {
 		t.Fatal("assets elsewhere are fetched")
 	}
 }
+
+// mirror is a stand-in for the download service: /latest redirects to the latest tag, and a
+// release's files are under /download/<tag>/.
+func newMirror(t *testing.T, tag string, archive []byte) (*httptest.Server, *[]string) {
+	sum := sha256.Sum256(archive)
+	sums := hex.EncodeToString(sum[:]) + "  " + Archive + "\n"
+	var mu sync.Mutex
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/latest":
+			http.Redirect(w, r, "/tag/"+tag, http.StatusFound)
+		case "/download/" + tag + "/" + Archive:
+			w.Write(archive)
+		case "/download/" + tag + "/" + Checksums:
+			io.WriteString(w, sums)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, &asked
+}
+
+func TestFallsBackToTheDownloadServiceWhenGitHubFails(t *testing.T) {
+	g := newGitHub(t)
+	g.server.Close()
+	mirror, asked := newMirror(t, "v0.3.0", tarball(t, client))
+	u := g.updater(t)
+	u.Mirror = mirror.URL
+	u.Hosts = append(u.Hosts, strings.TrimPrefix(mirror.URL, "http://"))
+	ok, err := u.Update(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("update from the download service: %v %v", ok, err)
+	}
+	if _, tag := u.Current(); tag != "v0.3.0" {
+		t.Fatalf("serving %q", tag)
+	}
+	if ok, err := u.Update(context.Background()); err != nil || ok {
+		t.Fatalf("the same release is fetched again: %v %v", ok, err)
+	}
+	if len(*asked) != 4 {
+		t.Fatalf("asked the download service %v", *asked)
+	}
+}
+
+func TestDownloadServiceOnlyWhenGitHubCannotAnswer(t *testing.T) {
+	g := newGitHub(t)
+	g.publish("v0.2.0", tarball(t, client))
+	mirror, asked := newMirror(t, "v0.3.0", tarball(t, client))
+	u := g.updater(t)
+	u.Mirror = mirror.URL
+	u.Hosts = append(u.Hosts, strings.TrimPrefix(mirror.URL, "http://"))
+	if ok, err := u.Update(context.Background()); err != nil || !ok {
+		t.Fatalf("update: %v %v", ok, err)
+	}
+	// GitHub answering that its latest release has no client is not a failure to reach it.
+	g.mu.Lock()
+	g.tag, g.assets = "v0.2.1", false
+	g.mu.Unlock()
+	if _, err := u.Update(context.Background()); !errors.Is(err, ErrNoClient) {
+		t.Fatalf("got %v", err)
+	}
+	if len(*asked) != 0 {
+		t.Fatalf("asked the download service %v", *asked)
+	}
+}
+
+func TestDownloadServiceFilesAreChecked(t *testing.T) {
+	g := newGitHub(t)
+	g.server.Close()
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			http.Redirect(w, r, "/tag/v0.3.0", http.StatusFound)
+		case "/download/v0.3.0/" + Archive:
+			w.Write(tarball(t, client))
+		case "/download/v0.3.0/" + Checksums:
+			io.WriteString(w, strings.Repeat("0", 64)+"  "+Archive+"\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mirror.Close()
+	u := g.updater(t)
+	u.Mirror = mirror.URL
+	u.Hosts = append(u.Hosts, strings.TrimPrefix(mirror.URL, "http://"))
+	_, err := u.Update(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "checksum") || !strings.Contains(err.Error(), "download service") {
+		t.Fatalf("a client that does not match: %v", err)
+	}
+	if dir, _ := u.Current(); dir != "" {
+		t.Fatal("a client that does not match is served")
+	}
+	if !(&Updater{}).allowed(mustURL(t, "https://download.kettu.sh/latest")) {
+		t.Fatal("the download service is refused")
+	}
+}

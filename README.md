@@ -28,7 +28,7 @@ It only passes Kettu's end-to-end encrypted channel along, so it never sees your
 Point a domain at your server, open ports 80 and 443, and install it as a service (Linux with systemd):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+curl -fsSL https://kettu.sh/relay/install | sudo sh -s -- --domain relay.example.com
 ```
 
 Or run it in Docker:

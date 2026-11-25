@@ -85,10 +85,10 @@ The link then reads `https://203.0.113.7#key=krk_...&pin=...`, and Kettu trusts 
 
 ### With systemd
 
-The install script does it all on Linux: it downloads the latest release, checks it against `SHA256SUMS`, creates the `kettu-relay` user, installs the program and the unit in [`deploy/kettu-relay.service`](../deploy/kettu-relay.service), writes the settings to `/etc/kettu-relay.env`, starts the service and prints the link. Give one of `--domain`, `--ip` and `--url`:
+The install script does it all on Linux: it downloads the latest release from Kettu's download service, or from the [releases](https://github.com/KettuAI/relay/releases) on GitHub when that fails, checks it against `SHA256SUMS`, creates the `kettu-relay` user, installs the program and the unit in [`deploy/kettu-relay.service`](../deploy/kettu-relay.service), writes the settings to `/etc/kettu-relay.env`, starts the service and prints the link. Give one of `--domain`, `--ip` and `--url`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+curl -fsSL https://kettu.sh/relay/install | sudo sh -s -- --domain relay.example.com
 ```
 
 Run it again to update the program; the settings and the access key stay. `--version X.Y.Z` installs a given version, and `--no-service` (or running it on macOS) installs the program only.
@@ -166,7 +166,7 @@ Each computer may have 16 devices connected at once, a message may be up to 64 K
 
 ## The web client
 
-So that a browser can reach your computers through your relay, the relay serves Kettu's web client at its own address. When it starts, and every day after, it downloads the web client built for relays from the latest [Kettu release](https://github.com/KettuAI/Kettu/releases), checks it against the release's SHA-256 checksums and unpacks it into its data directory. When a download fails it keeps serving the copy it has; before it ever got one, it serves none and says so in its log.
+So that a browser can reach your computers through your relay, the relay serves Kettu's web client at its own address. When it starts, and every day after, it downloads the web client built for relays from the latest [Kettu release](https://github.com/KettuAI/Kettu/releases) on GitHub, or from Kettu's download service when GitHub cannot be reached, checks it against the release's SHA-256 checksums and unpacks it into its data directory. When a download fails it keeps serving the copy it has; before it ever got one, it serves none and says so in its log.
 
 A computer's **Add device** then gives browsers a link to `https://<your relay>/pair#...`. The page talks only to its own origin, the relay, and pairs and runs sessions like the hosted web client.
 

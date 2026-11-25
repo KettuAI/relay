@@ -37,6 +37,9 @@ jobs:
               -ldflags "-s -w -X main.version=${version}" -o "build/$name/$bin" ./cmd/kettu-relay
             cp LICENSE THIRD_PARTY_NOTICES.txt README.md "build/$name/"
             mkdir "build/$name/docs" && cp docs/deploy.md docs/deploy.zh-CN.md "build/$name/docs/"
+            if [ "$os" != windows ]; then
+              mkdir "build/$name/deploy" && cp deploy/kettu-relay.service "build/$name/deploy/"
+            fi
             if [ "$os" = windows ]; then
               (cd build && zip -qr "../dist/$name.zip" "$name")
             else

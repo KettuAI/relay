@@ -4,6 +4,13 @@ All notable changes to kettu-relay. Versions follow [semantic versioning](https:
 
 ## [Unreleased]
 
+- `install.sh` downloads from Kettu's download service and falls back to GitHub, so a server that
+  cannot reach GitHub can install and update the relay; it is served at
+  `https://kettu.sh/relay/install`. It takes the service unit from the archive, which now carries
+  it under `deploy/`, instead of from raw.githubusercontent.com.
+- When GitHub cannot be reached, the web client is downloaded from Kettu's download service,
+  checked against the same release's SHA-256 checksums.
+
 ## [0.1.1] - 2026-11-25
 
 - Serves the web client's artifact frames, `/_kettu/frame`, `/_kettu/frame-strict` and
