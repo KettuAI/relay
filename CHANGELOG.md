@@ -4,6 +4,8 @@ All notable changes to kettu-relay. Versions follow [semantic versioning](https:
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-25
+
 - `install.sh` downloads from Kettu's download service and falls back to GitHub, so a server that
   cannot reach GitHub can install and update the relay; it is served at
   `https://kettu.sh/relay/install`. It takes the service unit from the archive, which now carries
