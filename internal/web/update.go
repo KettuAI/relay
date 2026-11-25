@@ -1,6 +1,7 @@
 // Package web keeps and serves the Kettu web client built for relays, so a browser reaches a
 // computer through this relay without any hosted page. The client comes from the latest Kettu
-// release on GitHub and is used only when its SHA-256 matches the release's checksum file.
+// release on GitHub, or from Kettu's download service when GitHub cannot be reached, and is used
+// only when its SHA-256 matches the release's checksum file.
 package web
 
 import (
@@ -36,6 +37,8 @@ const (
 	DefaultRelease = "https://api.github.com/repos/KettuAI/Kettu/releases/latest"
 	// downloadPrefix is where the release's assets must be.
 	downloadPrefix = "https://github.com/KettuAI/Kettu/releases/download/"
+	// DefaultMirror is Kettu's download service, laid out as the releases on GitHub.
+	DefaultMirror = "https://download.kettu.sh"
 
 	maxArchive   = 64 << 20
 	maxFiles     = 5000
@@ -65,8 +68,10 @@ type Updater struct {
 	Release string
 	// AllowedPrefix is where asset downloads may point; the Kettu releases when "".
 	AllowedPrefix string
-	// Hosts are the https hosts a request or its redirects may reach; GitHub's release hosts
-	// when nil.
+	// Mirror is the download service tried when GitHub fails; DefaultMirror when "".
+	Mirror string
+	// Hosts are the https hosts a request or its redirects may reach; GitHub's release hosts and
+	// the download service's when nil.
 	Hosts  []string
 	Client *http.Client
 
@@ -117,14 +122,26 @@ type release struct {
 
 // Update fetches the latest release's client unless it is the one served, and switches to it
 // once checked and unpacked. It reports whether it switched; on any failure the copy served
-// before stays.
+// before stays. GitHub comes first, so a relay that reaches it never asks the download service.
 func (u *Updater) Update(ctx context.Context) (bool, error) {
+	ok, err := u.updateFrom(ctx, u.fromGitHub)
+	if err == nil || errors.Is(err, ErrNoClient) {
+		return ok, err
+	}
+	ok, mirrorErr := u.updateFrom(ctx, u.fromMirror)
+	if mirrorErr != nil {
+		return false, fmt.Errorf("%w; and from the download service: %w", err, mirrorErr)
+	}
+	return ok, nil
+}
+
+// latest finds the latest release's tag and the addresses of its client and checksums.
+type latest func(context.Context) (tag, archiveURL, sumsURL string, err error)
+
+func (u *Updater) fromGitHub(ctx context.Context) (string, string, string, error) {
 	var rel release
 	if err := u.getJSON(ctx, or(u.Release, DefaultRelease), &rel); err != nil {
-		return false, err
-	}
-	if _, tag := u.Current(); tag != "" && tag == rel.Tag {
-		return false, nil
+		return "", "", "", err
 	}
 	var archiveURL, sumsURL string
 	for _, a := range rel.Assets {
@@ -136,11 +153,40 @@ func (u *Updater) Update(ctx context.Context) (bool, error) {
 		}
 	}
 	if archiveURL == "" || sumsURL == "" {
-		return false, ErrNoClient
+		return "", "", "", ErrNoClient
 	}
 	prefix := or(u.AllowedPrefix, downloadPrefix)
 	if !strings.HasPrefix(archiveURL, prefix) || !strings.HasPrefix(sumsURL, prefix) {
-		return false, errors.New("the release's assets are not where Kettu releases are")
+		return "", "", "", errors.New("the release's assets are not where Kettu releases are")
+	}
+	return rel.Tag, archiveURL, sumsURL, nil
+}
+
+var mirrorTag = regexp.MustCompile(`/tag/(v[0-9A-Za-z.+-]{1,64})$`)
+
+// fromMirror reads the latest tag from where the download service's /latest redirects, and takes
+// that release's files from the service, as laid out on GitHub.
+func (u *Updater) fromMirror(ctx context.Context) (string, string, string, error) {
+	base := strings.TrimRight(or(u.Mirror, DefaultMirror), "/")
+	location, err := u.redirectTarget(ctx, base+"/latest")
+	if err != nil {
+		return "", "", "", err
+	}
+	m := mirrorTag.FindStringSubmatch(location)
+	if m == nil {
+		return "", "", "", fmt.Errorf("the download service named no release: %q", location)
+	}
+	files := base + "/download/" + m[1] + "/"
+	return m[1], files + Archive, files + Checksums, nil
+}
+
+func (u *Updater) updateFrom(ctx context.Context, find latest) (bool, error) {
+	tag, archiveURL, sumsURL, err := find(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, current := u.Current(); current != "" && current == tag {
+		return false, nil
 	}
 	sums, err := u.get(ctx, sumsURL, maxChecksums)
 	if err != nil {
@@ -172,7 +218,7 @@ func (u *Updater) Update(ctx context.Context) (bool, error) {
 		os.RemoveAll(dir)
 		return false, err
 	}
-	if err := os.WriteFile(filepath.Join(root, ".release"), []byte(rel.Tag+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".release"), []byte(tag+"\n"), 0o600); err != nil {
 		os.RemoveAll(dir)
 		return false, err
 	}
@@ -182,7 +228,7 @@ func (u *Updater) Update(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	before, _ := u.Current()
-	u.set(root, rel.Tag)
+	u.set(root, tag)
 	u.prune(dir, before)
 	return true, nil
 }
@@ -244,8 +290,9 @@ func checksum(sums []byte, name string) ([]byte, error) {
 	return nil, fmt.Errorf("%s does not list %s", Checksums, name)
 }
 
-// githubHosts are where the release API and its downloads answer, redirects included.
-var githubHosts = []string{"api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+// defaultHosts are where the release API and its downloads answer, redirects included, and the
+// download service.
+var defaultHosts = []string{"api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "download.kettu.sh"}
 
 func (u *Updater) allowed(target *url.URL) bool {
 	hosts := u.Hosts
@@ -253,7 +300,7 @@ func (u *Updater) allowed(target *url.URL) bool {
 		if target.Scheme != "https" {
 			return false
 		}
-		hosts = githubHosts
+		hosts = defaultHosts
 	}
 	for _, h := range hosts {
 		if strings.EqualFold(target.Host, h) {
@@ -299,6 +346,33 @@ func (u *Updater) request(ctx context.Context, target string) (*http.Response, e
 		return nil, fmt.Errorf("%s answered %s", req.URL.Host, resp.Status)
 	}
 	return resp, nil
+}
+
+// redirectTarget is where target redirects to, without following it.
+func (u *Updater) redirectTarget(ctx context.Context, target string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return "", err
+	}
+	if !u.allowed(req.URL) {
+		return "", fmt.Errorf("%s is not where Kettu releases are", req.URL.Host)
+	}
+	req.Header.Set("User-Agent", "kettu-relay")
+	c := u.client()
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return "", fmt.Errorf("%s answered %s", req.URL.Host, resp.Status)
+	}
+	location, err := resp.Location()
+	if err != nil {
+		return "", err
+	}
+	return location.String(), nil
 }
 
 func (u *Updater) get(ctx context.Context, target string, limit int64) ([]byte, error) {

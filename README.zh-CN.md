@@ -28,7 +28,7 @@ kettu-relay 是 [Kettu](https://github.com/KettuAI/Kettu) 的中继，运行在�
 把域名解析到你的服务器，放开 80 和 443 端口，然后装成系统服务（Linux，systemd）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+curl -fsSL https://kettu.sh/relay/install | sudo sh -s -- --domain relay.example.com
 ```
 
 或者用 Docker 运行：

@@ -25,8 +25,9 @@ You will get an answer within a week, and a fix is released before the problem i
 - `X-Forwarded-For` is believed only from the proxies in `KETTU_RELAY_TRUSTED_PROXIES`. Behind a
   proxy the relay serves plain http only on loopback unless told otherwise, and then takes
   connections only from those proxies.
-- The web client is downloaded only over https from GitHub's release hosts, redirects included,
-  and used only when it matches the release's SHA-256 checksum; the download, the unpacked size and
+- The web client is downloaded only over https from GitHub's release hosts, or from Kettu's
+  download service when GitHub cannot be reached, redirects included, and used only when it
+  matches the release's SHA-256 checksum; the download, the unpacked size and
   the number of files are capped, and unpacking refuses paths outside its folder, links and special
   files. Whoever runs a relay controls the pages it serves.
 - Private keys of certificates and of the Let's Encrypt account are kept in files readable by the

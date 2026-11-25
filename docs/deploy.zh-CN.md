@@ -85,10 +85,10 @@ docker run -d --name kettu-relay --restart unless-stopped \
 
 ### 用 systemd
 
-在 Linux 上，安装脚本会一次做完：下载最新版本、用 `SHA256SUMS` 校验、创建 `kettu-relay` 用户、安装程序和 [`deploy/kettu-relay.service`](../deploy/kettu-relay.service) 里的 unit、把设置写进 `/etc/kettu-relay.env`、启动服务并打印链接。`--domain`、`--ip` 和 `--url` 给一个：
+在 Linux 上，安装脚本会一次做完：从 Kettu 的下载服务下载最新版本（失败时改从 GitHub 的 [releases](https://github.com/KettuAI/relay/releases) 下载）、用 `SHA256SUMS` 校验、创建 `kettu-relay` 用户、安装程序和 [`deploy/kettu-relay.service`](../deploy/kettu-relay.service) 里的 unit、把设置写进 `/etc/kettu-relay.env`、启动服务并打印链接。`--domain`、`--ip` 和 `--url` 给一个：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KettuAI/relay/main/install.sh | sudo sh -s -- --domain relay.example.com
+curl -fsSL https://kettu.sh/relay/install | sudo sh -s -- --domain relay.example.com
 ```
 
 再运行一次就是更新程序，设置和访问密钥都保留。`--version X.Y.Z` 安装指定版本；加 `--no-service`（或在 macOS 上运行）只安装程序。
@@ -166,7 +166,7 @@ go run github.com/KettuAI/relay/cmd/kettu-relay@latest
 
 ## 网页版
 
-为了让浏览器也能经你的中继连上你的电脑，中继在自己的地址上提供 Kettu 的网页版。它在启动时和之后每天，从最新的 [Kettu 发布](https://github.com/KettuAI/Kettu/releases)下载为中继构建的网页版，用发布里的 SHA-256 校验和检查后解压到数据目录。下载失败时，它继续提供已有的那份；一次都没下载成功之前，它不提供网页版，并在日志里说明。
+为了让浏览器也能经你的中继连上你的电脑，中继在自己的地址上提供 Kettu 的网页版。它在启动时和之后每天，从 GitHub 上最新的 [Kettu 发布](https://github.com/KettuAI/Kettu/releases)下载为中继构建的网页版（连不上 GitHub 时改从 Kettu 的下载服务下载），用发布里的 SHA-256 校验和检查后解压到数据目录。下载失败时，它继续提供已有的那份；一次都没下载成功之前，它不提供网页版，并在日志里说明。
 
 这样一来，电脑上的 **添加设备** 会给浏览器一个 `https://<你的中继>/pair#...` 链接。这个页面只和它自己的来源，也就是中继通信，配对和使用会话都和托管的网页版一样。
 
