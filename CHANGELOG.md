@@ -4,6 +4,12 @@ All notable changes to kettu-relay. Versions follow [semantic versioning](https:
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-28
+
+- `kettu-relay web update` checks for a newer Kettu web client immediately and hot-reloads it
+  without restarting a running relay or dropping active connections, or updates the copy on disk
+  when the relay is stopped.
+
 ## [0.1.2] - 2026-11-25
 
 - `install.sh` downloads from Kettu's download service and falls back to GitHub, so a server that
