@@ -128,6 +128,7 @@ go run github.com/KettuAI/relay/cmd/kettu-relay@latest
 | `kettu-relay` | 运行中继。第一次启动打印它的链接；之后的启动只记下打码后的链接。 |
 | `kettu-relay link` | 打印完整链接；还没有访问密钥时会先生成。 |
 | `kettu-relay key reset` | 生成新的访问密钥。正在运行的中继会在几秒内断开用旧密钥登录的电脑；把新链接粘贴到每台电脑上。 |
+| `kettu-relay web update` | 立即检查并更新网页版：中继正在运行时原地热切换而不重启或断开连接；中继未运行时直接更新磁盘上的副本。 |
 | `kettu-relay version` | 打印版本。 |
 
 在 Docker 里，在容器中运行：`docker exec kettu-relay kettu-relay link`。
@@ -166,7 +167,7 @@ go run github.com/KettuAI/relay/cmd/kettu-relay@latest
 
 ## 网页版
 
-为了让浏览器也能经你的中继连上你的电脑，中继在自己的地址上提供 Kettu 的网页版。它在启动时和之后每天，从 GitHub 上最新的 [Kettu 发布](https://github.com/KettuAI/Kettu/releases)下载为中继构建的网页版（连不上 GitHub 时改从 Kettu 的下载服务下载），用发布里的 SHA-256 校验和检查后解压到数据目录。下载失败时，它继续提供已有的那份；一次都没下载成功之前，它不提供网页版，并在日志里说明。
+为了让浏览器也能经你的中继连上你的电脑，中继在自己的地址上提供 Kettu 的网页版。它在启动时和之后每天，从 GitHub 上最新的 [Kettu 发布](https://github.com/KettuAI/Kettu/releases)下载为中继构建的网页版（连不上 GitHub 时改从 Kettu 的下载服务下载），用发布里的 SHA-256 校验和检查后解压到数据目录。运行 `kettu-relay web update`（或在 Docker 中执行 `docker exec kettu-relay kettu-relay web update`）即可立即检查并热切换，无需重启中继。下载失败时，它继续提供已有的那份；一次都没下载成功之前，它不提供网页版，并在日志里说明。
 
 这样一来，电脑上的 **添加设备** 会给浏览器一个 `https://<你的中继>/pair#...` 链接。这个页面只和它自己的来源，也就是中继通信，配对和使用会话都和托管的网页版一样。
 
