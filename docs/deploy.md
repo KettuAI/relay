@@ -128,6 +128,7 @@ A computer uses one relay at a time. To go back, choose **Kettu relay** or **No 
 | `kettu-relay` | Runs the relay. The first start prints its link; later ones log it with the key masked. |
 | `kettu-relay link` | Prints the full link, making the access key if there is none yet. |
 | `kettu-relay key reset` | Makes a new access key. A running relay cuts off the computers signed in with the old key within a few seconds; paste the new link into each. |
+| `kettu-relay web update` | Checks for a newer web client right away and switches to it without restarting a running relay or dropping connections (or updates the copy on disk when the relay is stopped). |
 | `kettu-relay version` | Prints the version. |
 
 In Docker, run them in the container: `docker exec kettu-relay kettu-relay link`.
@@ -166,7 +167,7 @@ Each computer may have 16 devices connected at once, a message may be up to 64 K
 
 ## The web client
 
-So that a browser can reach your computers through your relay, the relay serves Kettu's web client at its own address. When it starts, and every day after, it downloads the web client built for relays from the latest [Kettu release](https://github.com/KettuAI/Kettu/releases) on GitHub, or from Kettu's download service when GitHub cannot be reached, checks it against the release's SHA-256 checksums and unpacks it into its data directory. When a download fails it keeps serving the copy it has; before it ever got one, it serves none and says so in its log.
+So that a browser can reach your computers through your relay, the relay serves Kettu's web client at its own address. When it starts, and every day after, it downloads the web client built for relays from the latest [Kettu release](https://github.com/KettuAI/Kettu/releases) on GitHub, or from Kettu's download service when GitHub cannot be reached, checks it against the release's SHA-256 checksums and unpacks it into its data directory. Run `kettu-relay web update` (or `docker exec kettu-relay kettu-relay web update`) to check and switch right away without restarting the relay. When a download fails it keeps serving the copy it has; before it ever got one, it serves none and says so in its log.
 
 A computer's **Add device** then gives browsers a link to `https://<your relay>/pair#...`. The page talks only to its own origin, the relay, and pairs and runs sessions like the hosted web client.
 

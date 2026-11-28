@@ -36,10 +36,11 @@ var version = "dev"
 const usage = `kettu-relay: a Kettu relay for your own server.
 
 Usage:
-  kettu-relay            run the relay
-  kettu-relay link       print the link to paste into Kettu again
-  kettu-relay key reset  make a new access key; computers signed in with the old one are cut off
-  kettu-relay version    print the version
+  kettu-relay             run the relay
+  kettu-relay link        print the link to paste into Kettu again
+  kettu-relay key reset   make a new access key; computers signed in with the old one are cut off
+  kettu-relay web update  check for a newer web client and switch to it without restarting
+  kettu-relay version     print the version
 
 The relay is set up with environment variables; see the README.
 `
@@ -54,6 +55,8 @@ func main() {
 		err = printLink()
 	case len(args) == 2 && args[0] == "key" && args[1] == "reset":
 		err = resetKey()
+	case len(args) == 2 && args[0] == "web" && args[1] == "update":
+		err = updateWeb()
 	case len(args) == 1 && (args[0] == "version" || args[0] == "--version"):
 		fmt.Println(version)
 	case len(args) == 1 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help"):
@@ -140,6 +143,49 @@ func resetKey() error {
 	fmt.Println("Made a new access key. A running relay cuts off computers signed in with the old one within a few seconds.")
 	fmt.Println("Paste the new link into Kettu on each computer:")
 	fmt.Println(s.link())
+	return nil
+}
+
+func updateWeb() error {
+	cfg, err := config.FromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	updater := &web.Updater{Dir: filepath.Join(cfg.DataDir, "web")}
+	return runWebUpdate(ctx, cfg, updater, os.Stdout)
+}
+
+func runWebUpdate(ctx context.Context, cfg config.Config, updater *web.Updater, out io.Writer) error {
+	if !cfg.Web {
+		if cfg.Mode == config.IP {
+			fmt.Fprintln(out, "Web client is not served at an IP address, since browsers cannot pin a certificate.")
+		} else {
+			fmt.Fprintln(out, "Web client is off (KETTU_RELAY_WEB=off).")
+		}
+		return nil
+	}
+	if _, err := private.Dir(cfg.DataDir); err != nil {
+		return err
+	}
+	res, err := updater.TriggerUpdate(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case res.Updated && res.From != "":
+		fmt.Fprintf(out, "Updated web client from %s to %s.\n", res.From, res.To)
+	case res.Updated:
+		fmt.Fprintf(out, "Updated web client to %s.\n", res.To)
+	case res.To != "":
+		fmt.Fprintf(out, "Web client is already up to date (%s).\n", res.To)
+	default:
+		fmt.Fprintln(out, "Web client is already up to date.")
+	}
+	if res.Updated && !res.ViaRelay {
+		fmt.Fprintln(out, "No running relay answered; the new copy is saved for the next start.")
+	}
 	return nil
 }
 

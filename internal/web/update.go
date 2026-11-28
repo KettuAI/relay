@@ -60,6 +60,18 @@ var (
 // ErrNoClient means the latest release has no web client for relays.
 var ErrNoClient = errors.New("the latest Kettu release has no web client for relays")
 
+// UpdateResult describes the outcome of a web client update check.
+type UpdateResult struct {
+	// Updated reports whether the web client switched to a newer release.
+	Updated bool `json:"updated"`
+	// From is the release served before the check, or "" when none was present.
+	From string `json:"from,omitempty"`
+	// To is the release served after the check, or "" when none is present.
+	To string `json:"to,omitempty"`
+	// ViaRelay reports whether a running relay performed the update in place.
+	ViaRelay bool `json:"-"`
+}
+
 // Updater downloads the web client into Dir and knows which copy to serve.
 type Updater struct {
 	// Dir holds the unpacked copies and the name of the current one.
@@ -74,6 +86,17 @@ type Updater struct {
 	// the download service's when nil.
 	Hosts  []string
 	Client *http.Client
+
+	// Coordination timings for TriggerUpdate and watchTriggers; zero uses the defaults.
+	pollInterval      time.Duration
+	ackTimeout        time.Duration
+	heartbeatInterval time.Duration
+	staleTimeout      time.Duration
+	resultTimeout     time.Duration
+	orphanMaxAge      time.Duration
+
+	gateOnce sync.Once
+	gate     chan struct{}
 
 	mu      sync.Mutex
 	current string
@@ -120,10 +143,50 @@ type release struct {
 	} `json:"assets"`
 }
 
+// acquire serializes updates so concurrent periodic ticks and manual triggers never race on the
+// data directory or pruning.
+func (u *Updater) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	u.gateOnce.Do(func() { u.gate = make(chan struct{}, 1) })
+	select {
+	case u.gate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (u *Updater) release() { <-u.gate }
+
 // Update fetches the latest release's client unless it is the one served, and switches to it
 // once checked and unpacked. It reports whether it switched; on any failure the copy served
 // before stays. GitHub comes first, so a relay that reaches it never asks the download service.
 func (u *Updater) Update(ctx context.Context) (bool, error) {
+	res, err := u.UpdateDetail(ctx)
+	return res.Updated, err
+}
+
+// UpdateDetail performs Update and returns the release tags before and after the check.
+func (u *Updater) UpdateDetail(ctx context.Context) (UpdateResult, error) {
+	if err := u.acquire(ctx); err != nil {
+		_, tag := u.Current()
+		return UpdateResult{From: tag, To: tag}, err
+	}
+	defer u.release()
+
+	_, before := u.Current()
+	updated, err := u.updateUnlocked(ctx)
+	_, after := u.Current()
+	return UpdateResult{
+		Updated: updated,
+		From:    before,
+		To:      after,
+	}, err
+}
+
+func (u *Updater) updateUnlocked(ctx context.Context) (bool, error) {
 	ok, err := u.updateFrom(ctx, u.fromGitHub)
 	if err == nil || errors.Is(err, ErrNoClient) {
 		return ok, err
@@ -255,26 +318,48 @@ func (u *Updater) prune(keep, before string) {
 	}
 }
 
-// Run updates at once and then every interval until ctx is done, logging what changed.
+// Run updates at once and then every interval until ctx is done, logging what changed. While it
+// runs it also watches for manual update requests from `kettu-relay web update` so updates happen
+// in place without restarting the relay.
 func (u *Updater) Run(ctx context.Context, interval time.Duration, logf func(string, ...any)) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		u.watchTriggers(ctx, logf)
+	}()
+	defer wg.Wait()
+
 	for {
-		ok, err := u.Update(ctx)
-		_, tag := u.Current()
-		switch {
-		case err != nil && tag != "":
-			logf("web client: update failed (%v); still serving %s", err, tag)
-		case errors.Is(err, ErrNoClient):
-			logf("web client: not served, since the latest Kettu release has none for relays yet")
-		case err != nil:
-			logf("web client: not served, since the download failed: %v", err)
-		case ok:
-			logf("web client: serving %s", tag)
-		}
+		res, err := u.UpdateDetail(ctx)
+		u.logResult(logf, res, err, false)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(interval):
+		case <-timer.C:
 		}
+	}
+}
+
+func (u *Updater) logResult(logf func(string, ...any), res UpdateResult, err error, manual bool) {
+	if logf == nil {
+		return
+	}
+	switch {
+	case err != nil && res.To != "":
+		logf("web client: update failed (%v); still serving %s", err, res.To)
+	case errors.Is(err, ErrNoClient):
+		logf("web client: not served, since the latest Kettu release has none for relays yet")
+	case err != nil:
+		logf("web client: not served, since the download failed: %v", err)
+	case res.Updated && res.From != "":
+		logf("web client: updated from %s to %s", res.From, res.To)
+	case res.Updated:
+		logf("web client: serving %s", res.To)
+	case manual && res.To != "":
+		logf("web client: already up to date (%s)", res.To)
 	}
 }
 
@@ -557,11 +642,19 @@ func clientRoot(dir string) (string, error) {
 }
 
 func writeAtomic(name string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(name), ".current-*")
+	return writeAtomicFile(name, ".current-*", data)
+}
+
+func writeAtomicFile(name, pattern string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(name), pattern)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
